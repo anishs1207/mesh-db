@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/anishs1207/mesh-db/internal/cluster"
+	hintstore "github.com/anishs1207/mesh-db/internal/hints"
 	"github.com/anishs1207/mesh-db/internal/identity"
 	"github.com/anishs1207/mesh-db/internal/protocol"
 	"github.com/anishs1207/mesh-db/internal/storage"
@@ -42,6 +44,7 @@ type Server struct {
 	stats             serverStats
 	clusterSecret     []byte
 	tlsConfig         *tls.Config
+	hints             *hintstore.Store
 
 	// Protects the logical clock shared by concurrent client handlers.
 	clockMu sync.Mutex
@@ -59,6 +62,8 @@ type serverStats struct {
 	repairScans       atomic.Uint64
 	repairKeys        atomic.Uint64
 	repairFailures    atomic.Uint64
+	hintsQueued       atomic.Uint64
+	hintsDelivered    atomic.Uint64
 }
 
 // nextVersion generates a monotonically increasing local version.
@@ -291,9 +296,37 @@ func (s *Server) quorumWrite(key string, record storage.Value) (int, []string) {
 		} else {
 			log.Printf("replication to %s failed: %v", result.owner, result.err)
 			failed = append(failed, result.owner)
+			if s.hints != nil {
+				if err := s.hints.Put(result.owner, key, record); err != nil {
+					log.Printf("persist hint for %s failed: %v", result.owner, err)
+				} else {
+					s.stats.hintsQueued.Add(1)
+				}
+			}
 		}
 	}
 	return acks, failed
+}
+
+func (s *Server) deliverHints() {
+	if s.hints == nil {
+		return
+	}
+	items, err := s.hints.List()
+	if err != nil {
+		log.Printf("list hints failed: %v", err)
+		return
+	}
+	for _, hint := range items {
+		if err := s.putReplica(hint.Owner, hint.Key, hint.Value); err != nil {
+			continue
+		}
+		if err := s.hints.Delete(hint.ID); err != nil {
+			log.Printf("delete delivered hint failed: %v", err)
+			continue
+		}
+		s.stats.hintsDelivered.Add(1)
+	}
 }
 
 func (s *Server) quorumRead(key string) (storage.Value, bool, int, error) {
@@ -562,9 +595,16 @@ meshdb_repair_keys_total %d
 # HELP meshdb_repair_failures_total Keys that could not reach a read quorum during repair.
 # TYPE meshdb_repair_failures_total counter
 meshdb_repair_failures_total %d
+# HELP meshdb_hints_queued_total Replica deliveries persisted for retry.
+# TYPE meshdb_hints_queued_total counter
+meshdb_hints_queued_total %d
+# HELP meshdb_hints_delivered_total Persisted replica deliveries completed.
+# TYPE meshdb_hints_delivered_total counter
+meshdb_hints_delivered_total %d
 `, ready, s.stats.activeConnections.Load(), s.stats.totalConnections.Load(),
 		s.stats.commands.Load(), s.stats.commandErrors.Load(), s.stats.quorumFailures.Load(),
-		s.stats.repairScans.Load(), s.stats.repairKeys.Load(), s.stats.repairFailures.Load())
+		s.stats.repairScans.Load(), s.stats.repairKeys.Load(), s.stats.repairFailures.Load(),
+		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load())
 }
 
 func newOperationsServer(address string, server *Server) *http.Server {
@@ -614,11 +654,12 @@ func main() {
 	operationsAddress := flag.String("operations-address", "", "health and metrics HTTP address (for example 127.0.0.1:9090)")
 	clusterSecretFile := flag.String("cluster-secret-file", "", "path to the shared inter-node authentication secret")
 	repairInterval := flag.Duration("repair-interval", 30*time.Second, "interval between anti-entropy scans (0 disables)")
+	hintInterval := flag.Duration("hint-interval", 5*time.Second, "interval between hinted-handoff retries (0 disables)")
 	tlsCertFile := flag.String("tls-cert", "", "PEM certificate for mutually authenticated TLS")
 	tlsKeyFile := flag.String("tls-key", "", "PEM private key for mutually authenticated TLS")
 	tlsCAFile := flag.String("tls-ca", "", "PEM CA used to verify clients and peers")
 	flag.Parse()
-	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 {
+	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 {
 		log.Fatal("connection limit and timeouts must be positive")
 	}
 
@@ -678,6 +719,11 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to open storage: ", err)
 	}
+	hints, err := hintstore.Open(filepath.Join(*dataDir, "hints"))
+	if err != nil {
+		_ = store.Close()
+		log.Fatal("failed to open hinted handoff: ", err)
+	}
 	nodeID, err := identity.LoadOrCreate(*dataDir)
 	if err != nil {
 		_ = store.Close()
@@ -708,6 +754,7 @@ func main() {
 		writeTimeout:      *writeTimeout,
 		clusterSecret:     clusterSecret,
 		tlsConfig:         tlsConfig,
+		hints:             hints,
 	}
 
 	listener, err := net.Listen("tcp", ":"+*port)
@@ -751,6 +798,20 @@ func main() {
 					return
 				case <-ticker.C:
 					server.repairOnce()
+				}
+			}
+		}()
+	}
+	if *hintInterval > 0 {
+		go func() {
+			ticker := time.NewTicker(*hintInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					server.deliverHints()
 				}
 			}
 		}()

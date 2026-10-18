@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/anishs1207/mesh-db/internal/cluster"
+	hintstore "github.com/anishs1207/mesh-db/internal/hints"
 	"github.com/anishs1207/mesh-db/internal/storage"
 )
 
@@ -229,6 +230,31 @@ func TestAntiEntropyRepairsKeyWithoutClientRead(t *testing.T) {
 	}
 	if first.stats.repairScans.Load() != 1 || first.stats.repairKeys.Load() != 1 {
 		t.Fatalf("unexpected repair metrics: scans=%d keys=%d", first.stats.repairScans.Load(), first.stats.repairKeys.Load())
+	}
+}
+
+func TestHintedHandoffDeliversPersistedMutation(t *testing.T) {
+	_, coordinator := startTestReplica(t)
+	ownerAddress, owner := startTestReplica(t)
+	hints, err := hintstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.hints = hints
+	value := storage.Value{Value: "eventual", Version: 12, Origin: "node-a"}
+	if err := hints.Put(ownerAddress, "missed", value); err != nil {
+		t.Fatal(err)
+	}
+	coordinator.deliverHints()
+	if got, ok := owner.store.Get("missed"); !ok || got != value {
+		t.Fatalf("hint not delivered: %#v ok=%v", got, ok)
+	}
+	items, err := hints.List()
+	if err != nil || len(items) != 0 {
+		t.Fatalf("delivered hint retained: %#v err=%v", items, err)
+	}
+	if coordinator.stats.hintsDelivered.Load() != 1 {
+		t.Fatalf("delivered metric = %d", coordinator.stats.hintsDelivered.Load())
 	}
 }
 

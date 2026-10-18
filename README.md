@@ -63,6 +63,10 @@ Nodes perform anti-entropy reconciliation every 30 seconds by default so a
 replica that missed writes can converge without waiting for a client read. Use
 `-repair-interval` to tune it or `-repair-interval=0` to disable it.
 
+Failed replica deliveries are persisted under the node data directory and
+retried every five seconds. Tune this with `-hint-interval`; hints survive a
+coordinator restart and are removed only after the target acknowledges them.
+
 ## Containerized three-node cluster
 
 Create a local secret file outside the repository, point Compose at it, and
