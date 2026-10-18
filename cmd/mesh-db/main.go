@@ -378,6 +378,10 @@ func (s *Server) drainWriteResults(results <-chan replicaResult, remaining int, 
 }
 
 func (s *Server) deliverHints() {
+	s.deliverHintsContext(context.Background())
+}
+
+func (s *Server) deliverHintsContext(ctx context.Context) {
 	if s.hints == nil {
 		return
 	}
@@ -386,6 +390,9 @@ func (s *Server) deliverHints() {
 		log.Printf("some hints could not be loaded: %v", err)
 	}
 	for _, hint := range items {
+		if ctx.Err() != nil {
+			return
+		}
 		if err := s.putReplica(hint.Owner, hint.Key, hint.Value); err != nil {
 			continue
 		}
@@ -478,8 +485,15 @@ func (s *Server) finishReadRepair(results <-chan replicaResult, remaining int, c
 }
 
 func (s *Server) repairOnce() {
+	s.repairOnceContext(context.Background())
+}
+
+func (s *Server) repairOnceContext(ctx context.Context) {
 	s.stats.repairScans.Add(1)
 	for key := range s.store.Entries() {
+		if ctx.Err() != nil {
+			return
+		}
 		if _, _, _, err := s.quorumRead(key); err != nil {
 			s.stats.repairFailures.Add(1)
 			continue
@@ -946,8 +960,11 @@ func main() {
 	}
 
 	server.stats.ready.Store(true)
+	var maintenance sync.WaitGroup
 	if *repairInterval > 0 {
+		maintenance.Add(1)
 		go func() {
+			defer maintenance.Done()
 			ticker := time.NewTicker(*repairInterval)
 			defer ticker.Stop()
 			for {
@@ -955,13 +972,15 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					server.repairOnce()
+					server.repairOnceContext(ctx)
 				}
 			}
 		}()
 	}
 	if *hintInterval > 0 {
+		maintenance.Add(1)
 		go func() {
+			defer maintenance.Done()
 			ticker := time.NewTicker(*hintInterval)
 			defer ticker.Stop()
 			for {
@@ -969,13 +988,15 @@ func main() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					server.deliverHints()
+					server.deliverHintsContext(ctx)
 				}
 			}
 		}()
 	}
 	if *compactionInterval > 0 {
+		maintenance.Add(1)
 		go func() {
+			defer maintenance.Done()
 			ticker := time.NewTicker(*compactionInterval)
 			defer ticker.Stop()
 			for {
@@ -1038,6 +1059,7 @@ func main() {
 	done := make(chan struct{})
 	go func() {
 		connections.Wait()
+		maintenance.Wait()
 		server.stopBackground()
 		close(done)
 	}()

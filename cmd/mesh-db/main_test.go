@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -333,6 +334,62 @@ func TestHintedHandoffDeliversPersistedMutation(t *testing.T) {
 	}
 	if coordinator.stats.hintsDelivered.Load() != 1 {
 		t.Fatalf("delivered metric = %d", coordinator.stats.hintsDelivered.Load())
+	}
+}
+
+func TestHintDeliveryStopsAfterCancellation(t *testing.T) {
+	server := newTestServer(t)
+	hints, err := hintstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.hints = hints
+	server.hintBatchSize = 256
+	for index, key := range []string{"first", "second", "third"} {
+		if err := hints.Put("owner", key, storage.Value{Version: uint64(index + 1), Origin: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	server.replicaPut = func(string, string, storage.Value) error {
+		calls++
+		cancel()
+		return nil
+	}
+
+	server.deliverHintsContext(ctx)
+	if calls != 1 {
+		t.Fatalf("deliveries after cancellation = %d, want 1", calls)
+	}
+	remaining, err := hints.List()
+	if err != nil || len(remaining) != 2 {
+		t.Fatalf("remaining hints = %d, err=%v; want 2", len(remaining), err)
+	}
+}
+
+func TestRepairScanStopsAfterCancellation(t *testing.T) {
+	server := newTestServer(t)
+	for index, key := range []string{"first", "second", "third"} {
+		if _, err := server.store.Set(key, storage.Value{Version: uint64(index + 1), Origin: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	server.replicaGet = func(_ string, key string) (storage.Value, bool, error) {
+		calls++
+		cancel()
+		value, ok := server.store.Get(key)
+		return value, ok, nil
+	}
+
+	server.repairOnceContext(ctx)
+	if calls != 1 {
+		t.Fatalf("repairs after cancellation = %d, want 1", calls)
+	}
+	if server.stats.repairKeys.Load() != 1 {
+		t.Fatalf("repaired keys = %d, want 1", server.stats.repairKeys.Load())
 	}
 }
 
