@@ -3,12 +3,16 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -33,6 +37,7 @@ type Server struct {
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
 	stats             serverStats
+	clusterSecret     []byte
 
 	// Protects the logical clock shared by concurrent client handlers.
 	clockMu sync.Mutex
@@ -69,8 +74,27 @@ func (s *Server) observeVersion(version uint64) {
 	}
 }
 
-// replicate sends a versioned write to a peer.
-func replicate(peer, key string, record storage.Value) error {
+func signInternal(command string, secret []byte) string {
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write([]byte(command))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func authenticatedCommand(command string, secret []byte) string {
+	return "AUTH " + signInternal(command, secret) + " " + command
+}
+
+func verifyInternal(signature, command string, secret []byte) bool {
+	provided, err := hex.DecodeString(signature)
+	if err != nil || len(secret) == 0 {
+		return false
+	}
+	expected, err := hex.DecodeString(signInternal(command, secret))
+	return err == nil && hmac.Equal(provided, expected)
+}
+
+// replicate sends an authenticated versioned write to a peer.
+func replicate(peer, key string, record storage.Value, secret []byte) error {
 	conn, err := net.DialTimeout("tcp", peer, 2*time.Second)
 	if err != nil {
 		return err
@@ -83,12 +107,13 @@ func replicate(peer, key string, record storage.Value) error {
 
 	writer := bufio.NewWriter(conn)
 	command := fmt.Sprintf(
-		"REPLICA_SET %s %d %s %s\n",
+		"REPLICA_SET %s %d %s %s",
 		key,
 		record.Version,
 		record.Origin,
 		record.Value,
 	)
+	command = authenticatedCommand(command, secret) + "\n"
 
 	if _, err := writer.WriteString(command); err != nil {
 		return err
@@ -134,10 +159,10 @@ func (s *Server) putReplica(owner, key string, record storage.Value) error {
 		_, err := s.store.Set(key, record)
 		return err
 	}
-	return replicate(owner, key, record)
+	return replicate(owner, key, record, s.clusterSecret)
 }
 
-func fetchReplica(peer, key string) (storage.Value, bool, error) {
+func fetchReplica(peer, key string, secret []byte) (storage.Value, bool, error) {
 	conn, err := net.DialTimeout("tcp", peer, 2*time.Second)
 	if err != nil {
 		return storage.Value{}, false, err
@@ -146,7 +171,8 @@ func fetchReplica(peer, key string) (storage.Value, bool, error) {
 	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		return storage.Value{}, false, err
 	}
-	if _, err := fmt.Fprintf(conn, "REPLICA_GET %s\n", key); err != nil {
+	command := "REPLICA_GET " + key
+	if _, err := fmt.Fprintf(conn, "%s\n", authenticatedCommand(command, secret)); err != nil {
 		return storage.Value{}, false, err
 	}
 	line, err := bufio.NewReader(conn).ReadString('\n')
@@ -181,7 +207,7 @@ func (s *Server) getReplica(owner, key string) (storage.Value, bool, error) {
 		value, ok := s.store.Get(key)
 		return value, ok, nil
 	}
-	return fetchReplica(owner, key)
+	return fetchReplica(owner, key, s.clusterSecret)
 }
 
 func (s *Server) quorumWrite(key string, record storage.Value) (int, []string) {
@@ -249,6 +275,16 @@ func (s *Server) quorumRead(key string) (storage.Value, bool, int, error) {
 // handleCommand executes a database command.
 func (s *Server) handleCommand(line string) string {
 	s.stats.commands.Add(1)
+	authorizedInternal := false
+	if strings.HasPrefix(line, "AUTH ") {
+		parts := strings.SplitN(line, " ", 3)
+		if len(parts) != 3 || !verifyInternal(parts[1], parts[2], s.clusterSecret) {
+			s.stats.commandErrors.Add(1)
+			return "ERR unauthorized"
+		}
+		authorizedInternal = true
+		line = parts[2]
+	}
 	request, err := protocol.Parse(line)
 	if err != nil {
 		s.stats.commandErrors.Add(1)
@@ -275,6 +311,10 @@ func (s *Server) handleCommand(line string) string {
 		return fmt.Sprintf("OK version=%d acknowledgements=%d", record.Version, acks)
 
 	case protocol.ReplicaSet:
+		if !authorizedInternal {
+			s.stats.commandErrors.Add(1)
+			return "ERR unauthorized"
+		}
 		record := storage.Value{
 			Version: request.Version,
 			Origin:  request.Origin,
@@ -290,6 +330,10 @@ func (s *Server) handleCommand(line string) string {
 		return "OK"
 
 	case protocol.ReplicaGet:
+		if !authorizedInternal {
+			s.stats.commandErrors.Add(1)
+			return "ERR unauthorized"
+		}
 		record, ok := s.store.Get(request.Key)
 		if !ok {
 			return "NOT_FOUND"
@@ -427,6 +471,7 @@ func main() {
 	writeTimeout := flag.Duration("write-timeout", 10*time.Second, "maximum time writing a response")
 	shutdownTimeout := flag.Duration("shutdown-timeout", 15*time.Second, "graceful shutdown deadline")
 	operationsAddress := flag.String("operations-address", "", "health and metrics HTTP address (for example 127.0.0.1:9090)")
+	clusterSecretFile := flag.String("cluster-secret-file", "", "path to the shared inter-node authentication secret")
 	flag.Parse()
 	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 {
 		log.Fatal("connection limit and timeouts must be positive")
@@ -438,6 +483,20 @@ func main() {
 		if peer != "" {
 			peers = append(peers, peer)
 		}
+	}
+	var clusterSecret []byte
+	if *clusterSecretFile != "" {
+		contents, err := os.ReadFile(*clusterSecretFile)
+		if err != nil {
+			log.Fatal("failed to read cluster secret: ", err)
+		}
+		clusterSecret = []byte(strings.TrimSpace(string(contents)))
+		if len(clusterSecret) < 32 {
+			log.Fatal("cluster secret must contain at least 32 bytes")
+		}
+	}
+	if len(peers) > 0 && len(clusterSecret) == 0 {
+		log.Fatal("cluster-secret-file is required when peers are configured")
 	}
 	if *advertise == "" {
 		*advertise = "127.0.0.1:" + *port
@@ -493,6 +552,7 @@ func main() {
 		clock:             store.MaxVersion(),
 		readTimeout:       *readTimeout,
 		writeTimeout:      *writeTimeout,
+		clusterSecret:     clusterSecret,
 	}
 
 	listener, err := net.Listen("tcp", ":"+*port)

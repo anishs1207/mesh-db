@@ -11,6 +11,8 @@ import (
 	"github.com/anishs1207/mesh-db/internal/storage"
 )
 
+var testClusterSecret = []byte("test-secret-that-is-at-least-32-bytes-long")
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	store, err := storage.Open(t.TempDir())
@@ -28,6 +30,7 @@ func newTestServer(t *testing.T) *Server {
 		writeQuorum:       1,
 		nodeID:            self,
 		clock:             store.MaxVersion(),
+		clusterSecret:     testClusterSecret,
 	}
 }
 
@@ -50,6 +53,7 @@ func startTestReplica(t *testing.T) (string, *Server) {
 		replicationFactor: 1,
 		readQuorum:        1,
 		writeQuorum:       1,
+		clusterSecret:     testClusterSecret,
 	}
 	done := make(chan struct{})
 	go func() {
@@ -85,11 +89,25 @@ func TestCommandLifecycle(t *testing.T) {
 
 func TestReplicaAdvancesLogicalClock(t *testing.T) {
 	server := newTestServer(t)
-	if got := server.handleCommand("REPLICA_SET remote 9 peer-a replicated value"); got != "OK" {
+	command := "REPLICA_SET remote 9 peer-a replicated value"
+	if got := server.handleCommand(authenticatedCommand(command, testClusterSecret)); got != "OK" {
 		t.Fatalf("REPLICA_SET = %q", got)
 	}
 	if got := server.handleCommand("SET local next"); got != "OK version=10 acknowledgements=1" {
 		t.Fatalf("SET after replica = %q", got)
+	}
+}
+
+func TestRejectsUnauthenticatedReplicaCommands(t *testing.T) {
+	server := newTestServer(t)
+	if got := server.handleCommand("REPLICA_SET key 999 attacker poisoned"); got != "ERR unauthorized" {
+		t.Fatalf("unauthenticated replica write = %q", got)
+	}
+	if _, ok := server.store.Get("key"); ok {
+		t.Fatal("unauthenticated replica write mutated storage")
+	}
+	if got := server.handleCommand("AUTH bad REPLICA_GET key"); got != "ERR unauthorized" {
+		t.Fatalf("bad signature = %q", got)
 	}
 }
 

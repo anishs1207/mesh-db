@@ -30,6 +30,11 @@ go run ./cmd/mesh-db -port 7001 -peers 127.0.0.1:7000,127.0.0.1:7002
 go run ./cmd/mesh-db -port 7002 -peers 127.0.0.1:7000,127.0.0.1:7001
 ```
 
+Multi-node clusters require `-cluster-secret-file` on every node. The file must
+contain the same randomly generated secret of at least 32 bytes. Never commit
+that file; local secret files are covered by the `.env` ignore rules when named
+accordingly.
+
 Each key is placed on a consistent-hash ring. The defaults use replication
 factor 3 with majority read and write quorums. Override them with
 `-replication-factor`, `-read-quorum`, and `-write-quorum`; MeshDB rejects
