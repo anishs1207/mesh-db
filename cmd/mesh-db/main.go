@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anishs1207/mesh-db/internal/protocol"
 	"github.com/anishs1207/mesh-db/internal/storage"
 )
 
@@ -88,38 +89,29 @@ func replicate(peer, key string, record storage.Value) error {
 
 // handleCommand executes a database command.
 func (s *Server) handleCommand(line string) string {
-	parts := strings.Fields(line)
-	if len(parts) == 0 {
-		return "ERR empty command"
+	request, err := protocol.Parse(line)
+	if err != nil {
+		return "ERR " + err.Error()
 	}
 
-	switch strings.ToUpper(parts[0]) {
-	case "PING":
-		if len(parts) != 1 {
-			return "ERR usage: PING"
-		}
+	switch request.Command {
+	case protocol.Ping:
 		return "PONG"
 
-	case "SET":
-		if len(parts) != 3 {
-			return "ERR usage: SET <key> <value>"
-		}
-
-		key, value := parts[1], parts[2]
-
+	case protocol.Set:
 		record := storage.Value{
-			Value:   value,
+			Value:   request.Value,
 			Version: s.nextVersion(),
 			Origin:  s.nodeID,
 		}
 
-		if _, err := s.store.Set(key, record); err != nil {
+		if _, err := s.store.Set(request.Key, record); err != nil {
 			return "ERR persistence failure"
 		}
 
 		var failed []string
 		for _, peer := range s.peers {
-			if err := replicate(peer, key, record); err != nil {
+			if err := replicate(peer, request.Key, record); err != nil {
 				log.Printf("replication to %s failed: %v", peer, err)
 				failed = append(failed, peer)
 			}
@@ -132,36 +124,23 @@ func (s *Server) handleCommand(line string) string {
 
 		return "OK version=" + strconv.FormatUint(record.Version, 10)
 
-	case "REPLICA_SET":
-		if len(parts) != 5 {
-			return "ERR usage: REPLICA_SET <key> <version> <origin> <value>"
-		}
-
-		version, err := strconv.ParseUint(parts[2], 10, 64)
-		if err != nil {
-			return "ERR invalid version"
-		}
-
+	case protocol.ReplicaSet:
 		record := storage.Value{
-			Version: version,
-			Origin:  parts[3],
-			Value:   parts[4],
+			Version: request.Version,
+			Origin:  request.Origin,
+			Value:   request.Value,
 		}
 
-		s.observeVersion(version)
-		if _, err := s.store.Set(parts[1], record); err != nil {
+		s.observeVersion(request.Version)
+		if _, err := s.store.Set(request.Key, record); err != nil {
 			return "ERR persistence failure"
 		}
 
 		// A replica does not forward the write again.
 		return "OK"
 
-	case "GET":
-		if len(parts) != 2 {
-			return "ERR usage: GET <key>"
-		}
-
-		record, ok := s.store.Get(parts[1])
+	case protocol.Get:
+		record, ok := s.store.Get(request.Key)
 		if !ok {
 			return "NOT_FOUND"
 		}
@@ -174,7 +153,7 @@ func (s *Server) handleCommand(line string) string {
 		)
 
 	default:
-		return "ERR unknown command"
+		return "ERR unsupported command"
 	}
 }
 
@@ -182,6 +161,7 @@ func handleConnection(conn net.Conn, server *Server) {
 	defer conn.Close()
 
 	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 64<<10), protocol.MaxCommandBytes)
 	writer := bufio.NewWriter(conn)
 
 	for scanner.Scan() {
