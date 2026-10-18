@@ -53,6 +53,9 @@ type serverStats struct {
 	activeConnections atomic.Int64
 	totalConnections  atomic.Uint64
 	ready             atomic.Bool
+	repairScans       atomic.Uint64
+	repairKeys        atomic.Uint64
+	repairFailures    atomic.Uint64
 }
 
 // nextVersion generates a monotonically increasing local version.
@@ -288,6 +291,17 @@ func (s *Server) quorumRead(key string) (storage.Value, bool, int, error) {
 	return winner, foundWinner, successes, nil
 }
 
+func (s *Server) repairOnce() {
+	s.stats.repairScans.Add(1)
+	for key := range s.store.Entries() {
+		if _, _, _, err := s.quorumRead(key); err != nil {
+			s.stats.repairFailures.Add(1)
+			continue
+		}
+		s.stats.repairKeys.Add(1)
+	}
+}
+
 // handleCommand executes a database command.
 func (s *Server) handleCommand(line string) string {
 	s.stats.commands.Add(1)
@@ -494,8 +508,18 @@ meshdb_command_errors_total %d
 # HELP meshdb_quorum_failures_total Operations that did not reach quorum.
 # TYPE meshdb_quorum_failures_total counter
 meshdb_quorum_failures_total %d
+# HELP meshdb_repair_scans_total Anti-entropy scans started.
+# TYPE meshdb_repair_scans_total counter
+meshdb_repair_scans_total %d
+# HELP meshdb_repair_keys_total Keys reconciled by anti-entropy.
+# TYPE meshdb_repair_keys_total counter
+meshdb_repair_keys_total %d
+# HELP meshdb_repair_failures_total Keys that could not reach a read quorum during repair.
+# TYPE meshdb_repair_failures_total counter
+meshdb_repair_failures_total %d
 `, ready, s.stats.activeConnections.Load(), s.stats.totalConnections.Load(),
-		s.stats.commands.Load(), s.stats.commandErrors.Load(), s.stats.quorumFailures.Load())
+		s.stats.commands.Load(), s.stats.commandErrors.Load(), s.stats.quorumFailures.Load(),
+		s.stats.repairScans.Load(), s.stats.repairKeys.Load(), s.stats.repairFailures.Load())
 }
 
 func newOperationsServer(address string, server *Server) *http.Server {
@@ -544,8 +568,9 @@ func main() {
 	shutdownTimeout := flag.Duration("shutdown-timeout", 15*time.Second, "graceful shutdown deadline")
 	operationsAddress := flag.String("operations-address", "", "health and metrics HTTP address (for example 127.0.0.1:9090)")
 	clusterSecretFile := flag.String("cluster-secret-file", "", "path to the shared inter-node authentication secret")
+	repairInterval := flag.Duration("repair-interval", 30*time.Second, "interval between anti-entropy scans (0 disables)")
 	flag.Parse()
-	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 {
+	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 {
 		log.Fatal("connection limit and timeouts must be positive")
 	}
 
@@ -660,6 +685,20 @@ func main() {
 	}
 
 	server.stats.ready.Store(true)
+	if *repairInterval > 0 {
+		go func() {
+			ticker := time.NewTicker(*repairInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					server.repairOnce()
+				}
+			}
+		}()
+	}
 	semaphore := make(chan struct{}, *maxConnections)
 	var connections sync.WaitGroup
 	for {

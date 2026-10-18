@@ -137,3 +137,21 @@ func TestOpenRestoresInterruptedCompactionBackup(t *testing.T) {
 		t.Fatalf("backup value not recovered: %#v ok=%v", got, ok)
 	}
 }
+
+func TestEntriesReturnsIndependentSnapshot(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	value := Value{Value: "original", Version: 1, Origin: "node"}
+	if _, err := store.Set("key", value); err != nil {
+		t.Fatal(err)
+	}
+	entries := store.Entries()
+	entries["key"] = Value{Value: "mutated"}
+	delete(entries, "missing")
+	if got, _ := store.Get("key"); got != value {
+		t.Fatalf("snapshot mutated store: %#v", got)
+	}
+}

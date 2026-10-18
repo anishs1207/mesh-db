@@ -210,6 +210,28 @@ func TestCoordinatorAdvancesPastRemoteVersionBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestAntiEntropyRepairsKeyWithoutClientRead(t *testing.T) {
+	firstAddress, first := startTestReplica(t)
+	secondAddress, second := startTestReplica(t)
+	thirdAddress, third := startTestReplica(t)
+	members := []string{firstAddress, secondAddress, thirdAddress}
+	first.ring = cluster.NewRing(members, 64)
+	first.replicationFactor = 3
+	first.readQuorum = 2
+
+	winner := storage.Value{Value: "durable", Version: 8, Origin: "node-a"}
+	_, _ = first.store.Set("unread-key", winner)
+	_, _ = second.store.Set("unread-key", winner)
+
+	first.repairOnce()
+	if got, ok := third.store.Get("unread-key"); !ok || got != winner {
+		t.Fatalf("third replica was not repaired: %#v ok=%v", got, ok)
+	}
+	if first.stats.repairScans.Load() != 1 || first.stats.repairKeys.Load() != 1 {
+		t.Fatalf("unexpected repair metrics: scans=%d keys=%d", first.stats.repairScans.Load(), first.stats.repairKeys.Load())
+	}
+}
+
 func TestOperationsEndpoints(t *testing.T) {
 	server := newTestServer(t)
 	operations := newOperationsServer("127.0.0.1:0", server)

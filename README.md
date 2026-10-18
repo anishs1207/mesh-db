@@ -54,6 +54,10 @@ Client concurrency and slow connections are bounded by `-max-connections`,
 `-read-timeout`, and `-write-timeout`. SIGINT/SIGTERM stops admission and lets
 in-flight connections drain up to `-shutdown-timeout`.
 
+Nodes perform anti-entropy reconciliation every 30 seconds by default so a
+replica that missed writes can converge without waiting for a client read. Use
+`-repair-interval` to tune it or `-repair-interval=0` to disable it.
+
 ## Containerized three-node cluster
 
 Create a local secret file outside the repository, point Compose at it, and

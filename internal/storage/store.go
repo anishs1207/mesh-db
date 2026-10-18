@@ -267,6 +267,17 @@ func (s *Store) Get(key string) (Value, bool) {
 	return value, ok
 }
 
+// Entries returns a point-in-time copy suitable for maintenance scans.
+func (s *Store) Entries() map[string]Value {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entries := make(map[string]Value, len(s.data))
+	for key, value := range s.data {
+		entries[key] = value
+	}
+	return entries
+}
+
 func (s *Store) MaxVersion() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
