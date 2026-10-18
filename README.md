@@ -35,4 +35,7 @@ factor 3 with majority read and write quorums. Override them with
 `-replication-factor`, `-read-quorum`, and `-write-quorum`; MeshDB rejects
 configurations where R + W does not intersect.
 
+Use `-compact-on-startup` during a controlled restart to rewrite an oversized
+WAL with only the latest value for each key.
+
 Follow the build history in [`prompts/`](prompts/README.md).

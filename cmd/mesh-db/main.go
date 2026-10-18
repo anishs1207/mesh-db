@@ -330,6 +330,7 @@ func main() {
 		"comma-separated peer addresses",
 	)
 	dataDir := flag.String("data-dir", "./data", "directory for durable node data")
+	compactOnStartup := flag.Bool("compact-on-startup", false, "rewrite the WAL with only current values before serving")
 	advertise := flag.String("advertise", "", "address advertised to peers (default 127.0.0.1:<port>)")
 	replicationFactor := flag.Int("replication-factor", 3, "number of owners for each key")
 	readQuorum := flag.Int("read-quorum", 0, "successful replica reads required (default majority)")
@@ -373,6 +374,12 @@ func main() {
 	store, err := storage.Open(*dataDir)
 	if err != nil {
 		log.Fatal("failed to open storage: ", err)
+	}
+	if *compactOnStartup {
+		if err := store.Compact(); err != nil {
+			_ = store.Close()
+			log.Fatal("failed to compact storage: ", err)
+		}
 	}
 	defer func() {
 		if err := store.Close(); err != nil {

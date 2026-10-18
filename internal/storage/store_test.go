@@ -65,3 +65,75 @@ func TestRecoveryTruncatesTornTail(t *testing.T) {
 		t.Fatalf("valid record lost: %#v ok=%v", got, ok)
 	}
 }
+
+func TestCompactPreservesLatestValuesAndShrinksWAL(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := uint64(1); version <= 100; version++ {
+		if _, err := store.Set("hot-key", Value{Value: "value", Version: version, Origin: "node"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Set("other", Value{Value: "kept", Version: 101, Origin: "node"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(filepath.Join(dir, walName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(filepath.Join(dir, walName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() >= before.Size()/4 {
+		t.Fatalf("WAL did not shrink enough: before=%d after=%d", before.Size(), after.Size())
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if got, ok := store.Get("hot-key"); !ok || got.Version != 100 || got.Value != "value" {
+		t.Fatalf("latest value not recovered: %#v ok=%v", got, ok)
+	}
+	if got, ok := store.Get("other"); !ok || got.Value != "kept" {
+		t.Fatalf("other value not recovered: %#v ok=%v", got, ok)
+	}
+}
+
+func TestOpenRestoresInterruptedCompactionBackup(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Set("key", Value{Value: "value", Version: 1, Origin: "node"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, walName)
+	if err := os.Rename(path, path+".backup"); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if got, ok := store.Get("key"); !ok || got.Value != "value" {
+		t.Fatalf("backup value not recovered: %#v ok=%v", got, ok)
+	}
+}
