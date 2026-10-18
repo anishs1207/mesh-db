@@ -39,7 +39,10 @@ accordingly.
 For non-loopback deployments, enable mutually authenticated TLS 1.3 with
 `-tls-cert`, `-tls-key`, and `-tls-ca`. The same CA must trust every client and
 node certificate, and peer certificate DNS/IP names must match advertised
-addresses. Partial TLS configuration is rejected.
+addresses. Partial TLS configuration is rejected. MeshDB binds to loopback by
+default and rejects plaintext non-loopback `-listen-address` values unless the
+operator deliberately supplies `-allow-insecure-listen` (intended only for
+isolated development networks).
 
 Each key is placed on a consistent-hash ring. The defaults use replication
 factor 3 with majority read and write quorums. Override them with
@@ -101,6 +104,8 @@ MESHDB_CLUSTER_SECRET_FILE=../meshdb-cluster.secret docker compose up --build
 ```
 
 Client ports are 7000-7002 and operations ports are 9090-9092. Each node uses a
-separate persistent Docker volume and runs as a non-root user.
+separate persistent Docker volume and runs as a non-root user. This local demo
+explicitly opts into plaintext on its isolated container network; add mounted
+certificates and the TLS flags before adapting it for production.
 
 Follow the build history in [`prompts/`](prompts/README.md).

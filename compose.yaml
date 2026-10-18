@@ -11,6 +11,8 @@ services:
     <<: *node
     command:
       - -port=7000
+      - -listen-address=0.0.0.0:7000
+      - -allow-insecure-listen
       - -advertise=node1:7000
       - -peers=node2:7000,node3:7000
       - -data-dir=/data
@@ -23,6 +25,8 @@ services:
     <<: *node
     command:
       - -port=7000
+      - -listen-address=0.0.0.0:7000
+      - -allow-insecure-listen
       - -advertise=node2:7000
       - -peers=node1:7000,node3:7000
       - -data-dir=/data
@@ -35,6 +39,8 @@ services:
     <<: *node
     command:
       - -port=7000
+      - -listen-address=0.0.0.0:7000
+      - -allow-insecure-listen
       - -advertise=node3:7000
       - -peers=node1:7000,node2:7000
       - -data-dir=/data

@@ -422,3 +422,25 @@ func TestTLSConfigurationMustBeComplete(t *testing.T) {
 		t.Fatal("expected partial TLS configuration to fail")
 	}
 }
+
+func TestPlaintextListenRequiresLoopbackOrExplicitOptIn(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:7000", "[::1]:7000", "localhost:7000"} {
+		if err := validateListenAddress(address, false, false); err != nil {
+			t.Errorf("loopback address %q rejected: %v", address, err)
+		}
+	}
+	for _, address := range []string{"0.0.0.0:7000", ":7000", "192.0.2.10:7000", "db.internal:7000"} {
+		if err := validateListenAddress(address, false, false); err == nil {
+			t.Errorf("plaintext non-loopback address %q accepted", address)
+		}
+		if err := validateListenAddress(address, true, false); err != nil {
+			t.Errorf("TLS address %q rejected: %v", address, err)
+		}
+		if err := validateListenAddress(address, false, true); err != nil {
+			t.Errorf("explicit insecure address %q rejected: %v", address, err)
+		}
+	}
+	if err := validateListenAddress("not-an-address", true, false); err == nil {
+		t.Fatal("malformed listen address accepted")
+	}
+}

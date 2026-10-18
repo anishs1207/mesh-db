@@ -314,6 +314,20 @@ func loadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
 	}, nil
 }
 
+func validateListenAddress(address string, encrypted, allowInsecure bool) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid listen address: %w", err)
+	}
+	if encrypted || allowInsecure || strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("plaintext client protocol may only listen on loopback; configure TLS or explicitly set -allow-insecure-listen")
+}
+
 func (s *Server) quorumWrite(key string, record storage.Value) (int, []string) {
 	owners := s.owners(key)
 	results := make(chan replicaResult, len(owners))
@@ -793,6 +807,8 @@ func newOperationsServer(address string, server *Server) *http.Server {
 
 func main() {
 	port := flag.String("port", "7000", "TCP port to listen on")
+	listenAddress := flag.String("listen-address", "", "client listen address (default 127.0.0.1:<port>)")
+	allowInsecureListen := flag.Bool("allow-insecure-listen", false, "allow plaintext client traffic on a non-loopback address")
 	peersFlag := flag.String(
 		"peers",
 		"",
@@ -853,6 +869,12 @@ func main() {
 	}
 	if *advertise == "" {
 		*advertise = "127.0.0.1:" + *port
+	}
+	if *listenAddress == "" {
+		*listenAddress = net.JoinHostPort("127.0.0.1", *port)
+	}
+	if err := validateListenAddress(*listenAddress, tlsConfig != nil, *allowInsecureListen); err != nil {
+		log.Fatal(err)
 	}
 	members := append([]string{*advertise}, peers...)
 	ring := cluster.NewRing(members, cluster.DefaultVirtualNodes)
@@ -929,14 +951,14 @@ func main() {
 		hintBatchSize:     *hintBatchSize,
 	}
 
-	listener, err := net.Listen("tcp", ":"+*port)
+	listener, err := net.Listen("tcp", *listenAddress)
 	if err != nil {
 		log.Fatal("failed to start MeshDB:", err)
 	}
 	if tlsConfig != nil {
 		listener = tls.NewListener(listener, tlsConfig)
 	}
-	log.Printf("MeshDB node %s listening on port %s (advertise %s)", server.nodeID, *port, *advertise)
+	log.Printf("MeshDB node %s listening on %s (advertise %s)", server.nodeID, *listenAddress, *advertise)
 	log.Printf("Configured peers: %v", peers)
 	log.Printf("Replication N=%d R=%d W=%d", effectiveReplication, *readQuorum, *writeQuorum)
 
