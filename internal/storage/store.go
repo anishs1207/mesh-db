@@ -57,16 +57,32 @@ func Open(dir string) (*Store, error) {
 
 	path := filepath.Join(dir, walName)
 	backupPath := path + ".backup"
+	walExists := true
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		walExists = false
 		if _, backupErr := os.Stat(backupPath); backupErr == nil {
 			if err := os.Rename(backupPath, path); err != nil {
 				return nil, fmt.Errorf("restore WAL backup: %w", err)
 			}
+			if err := fsutil.SyncDir(dir); err != nil {
+				return nil, fmt.Errorf("persist restored WAL backup: %w", err)
+			}
+			walExists = true
+		} else if !errors.Is(backupErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect WAL backup: %w", backupErr)
 		}
+	} else if err != nil {
+		return nil, fmt.Errorf("inspect WAL: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open WAL: %w", err)
+	}
+	if !walExists {
+		if err := fsutil.SyncDir(dir); err != nil {
+			_ = f.Close()
+			return nil, fmt.Errorf("persist new WAL: %w", err)
+		}
 	}
 
 	s := &Store{data: make(map[string]Value), wal: f, walPath: path}
