@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/anishs1207/mesh-db/internal/cluster"
+	"github.com/anishs1207/mesh-db/internal/identity"
 	"github.com/anishs1207/mesh-db/internal/protocol"
 	"github.com/anishs1207/mesh-db/internal/storage"
 )
@@ -529,6 +530,11 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to open storage: ", err)
 	}
+	nodeID, err := identity.LoadOrCreate(*dataDir)
+	if err != nil {
+		_ = store.Close()
+		log.Fatal("failed to load node identity: ", err)
+	}
 	if *compactOnStartup {
 		if err := store.Compact(); err != nil {
 			_ = store.Close()
@@ -548,7 +554,7 @@ func main() {
 		replicationFactor: effectiveReplication,
 		readQuorum:        *readQuorum,
 		writeQuorum:       *writeQuorum,
-		nodeID:            *advertise,
+		nodeID:            nodeID,
 		clock:             store.MaxVersion(),
 		readTimeout:       *readTimeout,
 		writeTimeout:      *writeTimeout,
@@ -559,7 +565,7 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to start MeshDB:", err)
 	}
-	log.Printf("MeshDB node %s listening on port %s", server.nodeID, *port)
+	log.Printf("MeshDB node %s listening on port %s (advertise %s)", server.nodeID, *port, *advertise)
 	log.Printf("Configured peers: %v", peers)
 	log.Printf("Replication N=%d R=%d W=%d", effectiveReplication, *readQuorum, *writeQuorum)
 
