@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anishs1207/mesh-db/internal/cluster"
 	hintstore "github.com/anishs1207/mesh-db/internal/hints"
@@ -22,7 +23,7 @@ func newTestServer(t *testing.T) *Server {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	self := "test-node"
-	return &Server{
+	server := &Server{
 		store:             store,
 		ring:              cluster.NewRing([]string{self}, 16),
 		self:              self,
@@ -33,6 +34,8 @@ func newTestServer(t *testing.T) *Server {
 		clock:             store.MaxVersion(),
 		clusterSecret:     testClusterSecret,
 	}
+	t.Cleanup(server.stopBackground)
+	return server
 }
 
 func startTestReplica(t *testing.T) (string, *Server) {
@@ -70,9 +73,21 @@ func startTestReplica(t *testing.T) (string, *Server) {
 	t.Cleanup(func() {
 		_ = listener.Close()
 		<-done
+		server.stopBackground()
 		_ = store.Close()
 	})
 	return address, server
+}
+
+func eventually(t *testing.T, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition did not become true before deadline")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestCommandLifecycle(t *testing.T) {
@@ -160,11 +175,11 @@ func TestQuorumReadSelectsNewestAndRepairs(t *testing.T) {
 	if got := first.handleCommand("GET account"); got != "current balance (version=5 origin=node-b)" {
 		t.Fatalf("quorum GET = %q", got)
 	}
-	for name, replica := range map[string]*Server{"first": first, "second": second, "third": third} {
-		got, ok := replica.store.Get("account")
-		if !ok || got != winner {
-			t.Fatalf("%s replica not repaired: %#v ok=%v", name, got, ok)
-		}
+	for _, replica := range map[string]*Server{"first": first, "second": second, "third": third} {
+		eventually(t, func() bool {
+			got, ok := replica.store.Get("account")
+			return ok && got == winner
+		})
 	}
 }
 
@@ -183,12 +198,74 @@ func TestQuorumReadDoesNotResurrectDeletedValue(t *testing.T) {
 	if got := first.handleCommand("GET deleted"); got != "NOT_FOUND" {
 		t.Fatalf("deleted GET = %q", got)
 	}
-	for name, replica := range map[string]*Server{"first": first, "second": second, "third": third} {
-		got, ok := replica.store.Get("deleted")
-		if !ok || !got.Tombstone || got.Version != 5 {
-			t.Fatalf("%s tombstone not repaired: %#v ok=%v", name, got, ok)
-		}
+	for _, replica := range map[string]*Server{"first": first, "second": second, "third": third} {
+		eventually(t, func() bool {
+			got, ok := replica.store.Get("deleted")
+			return ok && got.Tombstone && got.Version == 5
+		})
 	}
+}
+
+func TestSuccessfulWriteReturnsWithoutWaitingForSlowReplica(t *testing.T) {
+	server := newTestServer(t)
+	server.ring = cluster.NewRing([]string{"fast-a", "fast-b", "slow"}, 16)
+	server.replicationFactor = 3
+	server.writeQuorum = 2
+	releaseSlow := make(chan struct{})
+	server.replicaPut = func(owner, _ string, _ storage.Value) error {
+		if owner == "slow" {
+			<-releaseSlow
+		}
+		return nil
+	}
+
+	done := make(chan int, 1)
+	go func() {
+		acks, _ := server.quorumWrite("key", storage.Value{Version: 1, Origin: "test"})
+		done <- acks
+	}()
+	select {
+	case acks := <-done:
+		if acks != 2 {
+			t.Fatalf("acknowledgements = %d, want quorum of 2", acks)
+		}
+	case <-time.After(200 * time.Millisecond):
+		close(releaseSlow)
+		t.Fatal("write waited for a replica after reaching quorum")
+	}
+	close(releaseSlow)
+}
+
+func TestSuccessfulReadReturnsWithoutWaitingForSlowReplica(t *testing.T) {
+	server := newTestServer(t)
+	server.ring = cluster.NewRing([]string{"fast-a", "fast-b", "slow"}, 16)
+	server.replicationFactor = 3
+	server.readQuorum = 2
+	releaseSlow := make(chan struct{})
+	winner := storage.Value{Value: "value", Version: 2, Origin: "test"}
+	server.replicaGet = func(owner, _ string) (storage.Value, bool, error) {
+		if owner == "slow" {
+			<-releaseSlow
+		}
+		return winner, true, nil
+	}
+	server.replicaPut = func(string, string, storage.Value) error { return nil }
+
+	done := make(chan storage.Value, 1)
+	go func() {
+		value, _, _, _ := server.quorumRead("key")
+		done <- value
+	}()
+	select {
+	case got := <-done:
+		if got != winner {
+			t.Fatalf("value = %#v, want %#v", got, winner)
+		}
+	case <-time.After(200 * time.Millisecond):
+		close(releaseSlow)
+		t.Fatal("read waited for a replica after reaching quorum")
+	}
+	close(releaseSlow)
 }
 
 func TestCoordinatorAdvancesPastRemoteVersionBeforeWrite(t *testing.T) {
@@ -225,9 +302,10 @@ func TestAntiEntropyRepairsKeyWithoutClientRead(t *testing.T) {
 	_, _ = second.store.Set("unread-key", winner)
 
 	first.repairOnce()
-	if got, ok := third.store.Get("unread-key"); !ok || got != winner {
-		t.Fatalf("third replica was not repaired: %#v ok=%v", got, ok)
-	}
+	eventually(t, func() bool {
+		got, ok := third.store.Get("unread-key")
+		return ok && got == winner
+	})
 	if first.stats.repairScans.Load() != 1 || first.stats.repairKeys.Load() != 1 {
 		t.Fatalf("unexpected repair metrics: scans=%d keys=%d", first.stats.repairScans.Load(), first.stats.repairKeys.Load())
 	}

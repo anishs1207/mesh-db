@@ -46,6 +46,11 @@ factor 3 with majority read and write quorums. Override them with
 `-replication-factor`, `-read-quorum`, and `-write-quorum`; MeshDB rejects
 configurations where R + W does not intersect.
 
+Writes return after the configured quorum acknowledges them; late failures are
+captured by hinted handoff. Reads return immediately when a quorum agrees, but
+wait for reconciliation when replicas disagree so newer values and tombstones
+are not hidden by the fast path.
+
 Use `-compact-on-startup` during a controlled restart to rewrite an oversized
 WAL with only the latest value for each key.
 

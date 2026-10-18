@@ -46,11 +46,37 @@ type Server struct {
 	tlsConfig         *tls.Config
 	hints             *hintstore.Store
 	hintBatchSize     int
+	replicaPut        func(string, string, storage.Value) error
+	replicaGet        func(string, string) (storage.Value, bool, error)
+	backgroundMu      sync.Mutex
+	background        sync.WaitGroup
+	backgroundClosing bool
 
 	// Protects the logical clock shared by concurrent client handlers.
 	clockMu sync.Mutex
 	clock   uint64
 	nodeID  string
+}
+
+func (s *Server) startBackground(work func()) bool {
+	s.backgroundMu.Lock()
+	defer s.backgroundMu.Unlock()
+	if s.backgroundClosing {
+		return false
+	}
+	s.background.Add(1)
+	go func() {
+		defer s.background.Done()
+		work()
+	}()
+	return true
+}
+
+func (s *Server) stopBackground() {
+	s.backgroundMu.Lock()
+	s.backgroundClosing = true
+	s.backgroundMu.Unlock()
+	s.background.Wait()
 }
 
 type serverStats struct {
@@ -183,6 +209,9 @@ func (s *Server) owners(key string) []string {
 }
 
 func (s *Server) putReplica(owner, key string, record storage.Value) error {
+	if s.replicaPut != nil {
+		return s.replicaPut(owner, key, record)
+	}
 	if owner == s.self {
 		applied, err := s.store.Set(key, record)
 		if err != nil {
@@ -247,6 +276,9 @@ func fetchReplica(peer, key string, secret []byte, tlsConfig *tls.Config) (stora
 }
 
 func (s *Server) getReplica(owner, key string) (storage.Value, bool, error) {
+	if s.replicaGet != nil {
+		return s.replicaGet(owner, key)
+	}
 	if owner == s.self {
 		value, ok := s.store.Get(key)
 		return value, ok, nil
@@ -286,13 +318,16 @@ func (s *Server) quorumWrite(key string, record storage.Value) (int, []string) {
 	owners := s.owners(key)
 	results := make(chan replicaResult, len(owners))
 	for _, owner := range owners {
-		go func(owner string) {
+		owner := owner
+		if !s.startBackground(func() {
 			results <- replicaResult{owner: owner, err: s.putReplica(owner, key, record)}
-		}(owner)
+		}) {
+			results <- replicaResult{owner: owner, err: fmt.Errorf("server shutting down")}
+		}
 	}
 	acks := 0
 	var failed []string
-	for range owners {
+	for completed := 0; completed < len(owners); completed++ {
 		result := <-results
 		if result.err == nil {
 			acks++
@@ -307,8 +342,39 @@ func (s *Server) quorumWrite(key string, record storage.Value) (int, []string) {
 				}
 			}
 		}
+		if acks >= s.writeQuorum {
+			remaining := len(owners) - completed - 1
+			if remaining > 0 {
+				if !s.startBackground(func() { s.drainWriteResults(results, remaining, key, record) }) {
+					s.drainWriteResults(results, remaining, key, record)
+				}
+			}
+			return acks, failed
+		}
 	}
 	return acks, failed
+}
+
+// drainWriteResults finishes deliveries after the client-visible quorum has
+// completed. A buffered result channel prevents the replica goroutines from
+// depending on this worker's scheduling, while durable hints preserve failed
+// deliveries for retry.
+func (s *Server) drainWriteResults(results <-chan replicaResult, remaining int, key string, record storage.Value) {
+	for range remaining {
+		result := <-results
+		if result.err == nil {
+			continue
+		}
+		log.Printf("replication to %s failed after quorum: %v", result.owner, result.err)
+		if s.hints == nil {
+			continue
+		}
+		if err := s.hints.Put(result.owner, key, record); err != nil {
+			log.Printf("persist hint for %s failed: %v", result.owner, err)
+		} else {
+			s.stats.hintsQueued.Add(1)
+		}
+	}
 }
 
 func (s *Server) deliverHints() {
@@ -335,40 +401,80 @@ func (s *Server) quorumRead(key string) (storage.Value, bool, int, error) {
 	owners := s.owners(key)
 	results := make(chan replicaResult, len(owners))
 	for _, owner := range owners {
-		go func(owner string) {
+		owner := owner
+		if !s.startBackground(func() {
 			value, found, err := s.getReplica(owner, key)
 			results <- replicaResult{owner: owner, value: value, found: found, err: err}
-		}(owner)
+		}) {
+			results <- replicaResult{owner: owner, err: fmt.Errorf("server shutting down")}
+		}
 	}
 
 	successes := 0
 	var winner storage.Value
 	foundWinner := false
+	allAgree := true
+	var firstFound bool
+	var firstValue storage.Value
+	haveSuccessfulResult := false
 	completed := make([]replicaResult, 0, len(owners))
-	for range owners {
+	for completedCount := 0; completedCount < len(owners); completedCount++ {
 		result := <-results
 		completed = append(completed, result)
 		if result.err != nil {
 			continue
 		}
 		successes++
+		if !haveSuccessfulResult {
+			firstFound, firstValue, haveSuccessfulResult = result.found, result.value, true
+		} else if result.found != firstFound || (result.found && result.value != firstValue) {
+			allAgree = false
+		}
 		if result.found && (!foundWinner || newer(result.value, winner)) {
 			winner, foundWinner = result.value, true
+		}
+		// An agreeing quorum can return immediately. When replicas disagree, wait
+		// for every reachable response so a minority carrying a newer committed
+		// value or tombstone is not ignored during reconciliation.
+		if successes >= s.readQuorum && allAgree {
+			remaining := len(owners) - completedCount - 1
+			if remaining == 0 {
+				s.finishReadRepair(results, remaining, completed, key, winner, foundWinner)
+			} else {
+				if !s.startBackground(func() {
+					s.finishReadRepair(results, remaining, completed, key, winner, foundWinner)
+				}) {
+					s.finishReadRepair(results, remaining, completed, key, winner, foundWinner)
+				}
+			}
+			return winner, foundWinner, successes, nil
 		}
 	}
 	if successes < s.readQuorum {
 		return storage.Value{}, false, successes, fmt.Errorf("read quorum unavailable")
 	}
-	if foundWinner {
-		for _, result := range completed {
-			if result.err == nil && (!result.found || newer(winner, result.value)) {
-				if err := s.putReplica(result.owner, key, winner); err != nil {
-					log.Printf("read repair to %s failed: %v", result.owner, err)
-				}
+	s.finishReadRepair(results, 0, completed, key, winner, foundWinner)
+	return winner, foundWinner, successes, nil
+}
+
+func (s *Server) finishReadRepair(results <-chan replicaResult, remaining int, completed []replicaResult, key string, winner storage.Value, foundWinner bool) {
+	for range remaining {
+		result := <-results
+		completed = append(completed, result)
+		if result.err == nil && result.found && (!foundWinner || newer(result.value, winner)) {
+			winner, foundWinner = result.value, true
+		}
+	}
+	if !foundWinner {
+		return
+	}
+	for _, result := range completed {
+		if result.err == nil && (!result.found || newer(winner, result.value)) {
+			if err := s.putReplica(result.owner, key, winner); err != nil {
+				log.Printf("read repair to %s failed: %v", result.owner, err)
 			}
 		}
 	}
-	return winner, foundWinner, successes, nil
 }
 
 func (s *Server) repairOnce() {
@@ -932,6 +1038,7 @@ func main() {
 	done := make(chan struct{})
 	go func() {
 		connections.Wait()
+		server.stopBackground()
 		close(done)
 	}()
 	select {
