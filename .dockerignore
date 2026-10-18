@@ -1,0 +1,11 @@
+.git
+.github
+.cache
+data
+prompt
+prompts
+.env*
+*.prof
+coverage.*
+mesh-db
+mesh-db.exe

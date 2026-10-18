@@ -54,4 +54,17 @@ Client concurrency and slow connections are bounded by `-max-connections`,
 `-read-timeout`, and `-write-timeout`. SIGINT/SIGTERM stops admission and lets
 in-flight connections drain up to `-shutdown-timeout`.
 
+## Containerized three-node cluster
+
+Create a local secret file outside the repository, point Compose at it, and
+start the cluster:
+
+```bash
+openssl rand -hex 32 > ../meshdb-cluster.secret
+MESHDB_CLUSTER_SECRET_FILE=../meshdb-cluster.secret docker compose up --build
+```
+
+Client ports are 7000-7002 and operations ports are 9090-9092. Each node uses a
+separate persistent Docker volume and runs as a non-root user.
+
 Follow the build history in [`prompts/`](prompts/README.md).
