@@ -11,6 +11,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/anishs1207/mesh-db/internal/fsutil"
 	"github.com/anishs1207/mesh-db/internal/storage"
 )
 
@@ -99,6 +100,9 @@ func (s *Store) Put(owner, key string, value storage.Value) error {
 	if err := os.Rename(tempName, target); err != nil {
 		return fmt.Errorf("install hint: %w", err)
 	}
+	if err := fsutil.SyncDir(s.dir); err != nil {
+		return fmt.Errorf("persist hint directory entry: %w", err)
+	}
 	s.used += int64(len(data))
 	return nil
 }
@@ -149,6 +153,9 @@ func (s *Store) Delete(id string) error {
 	}
 	if err == nil {
 		s.used -= info.Size()
+		if syncErr := fsutil.SyncDir(s.dir); syncErr != nil {
+			return fmt.Errorf("persist hint deletion: %w", syncErr)
+		}
 	}
 	return err
 }

@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+
+	"github.com/anishs1207/mesh-db/internal/fsutil"
 )
 
 const (
@@ -90,6 +92,9 @@ func (s *Store) recover() error {
 			if err := s.wal.Truncate(validOffset); err != nil {
 				return fmt.Errorf("truncate partial WAL header: %w", err)
 			}
+			if err := s.wal.Sync(); err != nil {
+				return fmt.Errorf("sync truncated WAL header: %w", err)
+			}
 			break
 		}
 		if err != nil {
@@ -106,6 +111,9 @@ func (s *Store) recover() error {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				if err := s.wal.Truncate(validOffset); err != nil {
 					return fmt.Errorf("truncate partial WAL record: %w", err)
+				}
+				if err := s.wal.Sync(); err != nil {
+					return fmt.Errorf("sync truncated WAL record: %w", err)
 				}
 				break
 			}
@@ -230,6 +238,12 @@ func (s *Store) Compact() error {
 		s.reopenWAL()
 		return fmt.Errorf("install compacted WAL: %w", err)
 	}
+	if err := fsutil.SyncDir(dir); err != nil {
+		_ = os.Remove(s.walPath)
+		_ = os.Rename(backupPath, s.walPath)
+		s.reopenWAL()
+		return fmt.Errorf("persist compacted WAL replacement: %w", err)
+	}
 	cleanupTemp = false
 	if err := s.reopenWAL(); err != nil {
 		_ = os.Remove(s.walPath)
@@ -239,6 +253,9 @@ func (s *Store) Compact() error {
 	}
 	if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove WAL backup: %w", err)
+	}
+	if err := fsutil.SyncDir(dir); err != nil {
+		return fmt.Errorf("persist WAL backup removal: %w", err)
 	}
 	return nil
 }
@@ -336,6 +353,9 @@ func (s *Store) Backup(destination string) error {
 	}
 	if err := os.Rename(tempPath, destination); err != nil {
 		return fmt.Errorf("install backup: %w", err)
+	}
+	if err := fsutil.SyncDir(dir); err != nil {
+		return fmt.Errorf("persist backup directory entry: %w", err)
 	}
 	return nil
 }

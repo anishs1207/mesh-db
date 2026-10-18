@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/anishs1207/mesh-db/internal/fsutil"
 )
 
 const fileName = "node.id"
@@ -42,6 +44,9 @@ func LoadOrCreate(dir string) (string, error) {
 	}
 	if err := f.Close(); err != nil {
 		return "", fmt.Errorf("close node identity: %w", err)
+	}
+	if err := fsutil.SyncDir(dir); err != nil {
+		return "", fmt.Errorf("persist node identity directory entry: %w", err)
 	}
 	return id, nil
 }
