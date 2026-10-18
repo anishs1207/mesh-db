@@ -195,3 +195,35 @@ func TestBackupRestoresValuesAndTombstones(t *testing.T) {
 		t.Fatalf("gone = %#v %v", got, ok)
 	}
 }
+
+func TestCompactionEligibilityUsesSizeAndStaleRatio(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for version := uint64(1); version <= 5; version++ {
+		if _, err := store.Set("hot", Value{Value: "value", Version: version, Origin: "n"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bytes, records, live, err := store.WALStats()
+	if err != nil || bytes <= 0 || records != 5 || live != 1 {
+		t.Fatalf("stats bytes=%d records=%d live=%d err=%v", bytes, records, live, err)
+	}
+	needed, err := store.NeedsCompaction(1, 2)
+	if err != nil || !needed {
+		t.Fatalf("expected compaction: needed=%v err=%v", needed, err)
+	}
+	needed, err = store.NeedsCompaction(bytes+1, 2)
+	if err != nil || needed {
+		t.Fatalf("size floor ignored: needed=%v err=%v", needed, err)
+	}
+	if err := store.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	_, records, live, err = store.WALStats()
+	if err != nil || records != 1 || live != 1 {
+		t.Fatalf("post-compact records=%d live=%d err=%v", records, live, err)
+	}
+}

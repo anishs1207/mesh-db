@@ -42,6 +42,7 @@ type Store struct {
 	wal        *os.File
 	walPath    string
 	maxVersion uint64
+	records    uint64
 }
 
 // Open recovers a store from dir and opens its WAL for appends.
@@ -127,6 +128,7 @@ func (s *Store) recover() error {
 			return fmt.Errorf("decode WAL record at offset %d: %w", validOffset, err)
 		}
 		s.apply(record.Key, record.Value)
+		s.records++
 		validOffset += int64(headerSize) + int64(length)
 	}
 	return nil
@@ -151,6 +153,7 @@ func (s *Store) Set(key string, value Value) (bool, error) {
 		return false, s.rollbackAppend(offset, fmt.Errorf("sync WAL: %w", err))
 	}
 	s.apply(key, value)
+	s.records++
 	return true, nil
 }
 
@@ -251,6 +254,7 @@ func (s *Store) Compact() error {
 		_ = s.reopenWAL()
 		return fmt.Errorf("reopen compacted WAL: %w", err)
 	}
+	s.records = uint64(len(s.data))
 	if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove WAL backup: %w", err)
 	}
@@ -364,6 +368,40 @@ func (s *Store) MaxVersion() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.maxVersion
+}
+
+// WALStats returns the current log size, total records, and live keys. The
+// record count makes obsolete-version amplification observable without
+// decoding the WAL again.
+func (s *Store) WALStats() (bytes int64, records uint64, liveKeys int, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	info, err := s.wal.Stat()
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("stat WAL: %w", err)
+	}
+	return info.Size(), s.records, len(s.data), nil
+}
+
+// NeedsCompaction reports whether both the size floor and stale-record ratio
+// are exceeded. Requiring both avoids repeatedly rewriting a large but mostly
+// live data set.
+func (s *Store) NeedsCompaction(minBytes int64, staleRatio float64) (bool, error) {
+	bytes, records, liveKeys, err := s.WALStats()
+	if err != nil {
+		return false, err
+	}
+	if minBytes <= 0 || bytes < minBytes || records == 0 {
+		return false, nil
+	}
+	if staleRatio < 1 {
+		staleRatio = 1
+	}
+	live := uint64(liveKeys)
+	if live == 0 {
+		return true, nil
+	}
+	return float64(records)/float64(live) >= staleRatio, nil
 }
 
 func (s *Store) Close() error {

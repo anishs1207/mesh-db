@@ -49,6 +49,12 @@ configurations where R + W does not intersect.
 Use `-compact-on-startup` during a controlled restart to rewrite an oversized
 WAL with only the latest value for each key.
 
+MeshDB also checks for online compaction every five minutes. By default it
+compacts only after the WAL reaches 256 MiB and contains at least twice as many
+records as retained keys. Tune this with `-compaction-interval`,
+`-compaction-min-bytes`, and `-compaction-stale-ratio`; set the interval to zero
+to keep compaction under external operational control.
+
 Use `-backup-on-startup /secure/path/backup.wal` during a controlled restart to
 create a compact, checksummed backup. The destination must be new. To restore,
 place the backup at `<new-data-dir>/meshdb.wal` before starting a node; always

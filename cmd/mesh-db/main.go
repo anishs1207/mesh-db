@@ -53,17 +53,19 @@ type Server struct {
 }
 
 type serverStats struct {
-	commands          atomic.Uint64
-	commandErrors     atomic.Uint64
-	quorumFailures    atomic.Uint64
-	activeConnections atomic.Int64
-	totalConnections  atomic.Uint64
-	ready             atomic.Bool
-	repairScans       atomic.Uint64
-	repairKeys        atomic.Uint64
-	repairFailures    atomic.Uint64
-	hintsQueued       atomic.Uint64
-	hintsDelivered    atomic.Uint64
+	commands           atomic.Uint64
+	commandErrors      atomic.Uint64
+	quorumFailures     atomic.Uint64
+	activeConnections  atomic.Int64
+	totalConnections   atomic.Uint64
+	ready              atomic.Bool
+	repairScans        atomic.Uint64
+	repairKeys         atomic.Uint64
+	repairFailures     atomic.Uint64
+	hintsQueued        atomic.Uint64
+	hintsDelivered     atomic.Uint64
+	compactions        atomic.Uint64
+	compactionFailures atomic.Uint64
 }
 
 // nextVersion generates a monotonically increasing local version.
@@ -611,10 +613,35 @@ meshdb_hint_bytes %d
 # HELP meshdb_hint_max_bytes Configured hint storage budget.
 # TYPE meshdb_hint_max_bytes gauge
 meshdb_hint_max_bytes %d
+%s
 `, ready, s.stats.activeConnections.Load(), s.stats.totalConnections.Load(),
 		s.stats.commands.Load(), s.stats.commandErrors.Load(), s.stats.quorumFailures.Load(),
 		s.stats.repairScans.Load(), s.stats.repairKeys.Load(), s.stats.repairFailures.Load(),
-		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load(), hintBytes, hintMaxBytes)
+		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load(), hintBytes, hintMaxBytes,
+		s.storageMetrics())
+}
+
+func (s *Server) storageMetrics() string {
+	walBytes, walRecords, liveKeys, err := s.store.WALStats()
+	if err != nil {
+		walBytes = -1
+	}
+	return fmt.Sprintf(`# HELP meshdb_wal_bytes Current write-ahead log size in bytes.
+# TYPE meshdb_wal_bytes gauge
+meshdb_wal_bytes %d
+# HELP meshdb_wal_records Records currently stored in the write-ahead log.
+# TYPE meshdb_wal_records gauge
+meshdb_wal_records %d
+# HELP meshdb_live_keys Keys retained by the local storage engine, including tombstones.
+# TYPE meshdb_live_keys gauge
+meshdb_live_keys %d
+# HELP meshdb_compactions_total Successful online WAL compactions.
+# TYPE meshdb_compactions_total counter
+meshdb_compactions_total %d
+# HELP meshdb_compaction_failures_total Failed online WAL compactions.
+# TYPE meshdb_compaction_failures_total counter
+meshdb_compaction_failures_total %d`, walBytes, walRecords, liveKeys,
+		s.stats.compactions.Load(), s.stats.compactionFailures.Load())
 }
 
 func newOperationsServer(address string, server *Server) *http.Server {
@@ -667,11 +694,14 @@ func main() {
 	repairInterval := flag.Duration("repair-interval", 30*time.Second, "interval between anti-entropy scans (0 disables)")
 	hintInterval := flag.Duration("hint-interval", 5*time.Second, "interval between hinted-handoff retries (0 disables)")
 	hintMaxBytes := flag.Int64("hint-max-bytes", 1<<30, "maximum disk bytes for pending hinted handoff")
+	compactionInterval := flag.Duration("compaction-interval", 5*time.Minute, "interval for checking WAL compaction eligibility (0 disables)")
+	compactionMinBytes := flag.Int64("compaction-min-bytes", 256<<20, "minimum WAL size before automatic compaction")
+	compactionStaleRatio := flag.Float64("compaction-stale-ratio", 2, "minimum WAL records per live key before automatic compaction")
 	tlsCertFile := flag.String("tls-cert", "", "PEM certificate for mutually authenticated TLS")
 	tlsKeyFile := flag.String("tls-key", "", "PEM private key for mutually authenticated TLS")
 	tlsCAFile := flag.String("tls-ca", "", "PEM CA used to verify clients and peers")
 	flag.Parse()
-	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 {
+	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 || *compactionInterval < 0 || *compactionMinBytes <= 0 || *compactionStaleRatio < 1 {
 		log.Fatal("connection limit and timeouts must be positive")
 	}
 
@@ -832,6 +862,34 @@ func main() {
 					return
 				case <-ticker.C:
 					server.deliverHints()
+				}
+			}
+		}()
+	}
+	if *compactionInterval > 0 {
+		go func() {
+			ticker := time.NewTicker(*compactionInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					needed, err := store.NeedsCompaction(*compactionMinBytes, *compactionStaleRatio)
+					if err != nil {
+						server.stats.compactionFailures.Add(1)
+						log.Printf("inspect WAL for compaction: %v", err)
+						continue
+					}
+					if !needed {
+						continue
+					}
+					if err := store.Compact(); err != nil {
+						server.stats.compactionFailures.Add(1)
+						log.Printf("automatic WAL compaction failed: %v", err)
+						continue
+					}
+					server.stats.compactions.Add(1)
 				}
 			}
 		}()
