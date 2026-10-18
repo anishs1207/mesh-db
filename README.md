@@ -57,6 +57,10 @@ are not hidden by the fast path.
 Use `-compact-on-startup` during a controlled restart to rewrite an oversized
 WAL with only the latest value for each key.
 
+WAL records are checksummed and explicitly format-versioned. Startup accepts
+legacy records created before format markers, but rejects unknown fields and
+future formats rather than silently corrupting data during an unsafe downgrade.
+
 MeshDB also checks for online compaction every five minutes. By default it
 compacts only after the WAL reaches 256 MiB and contains at least twice as many
 records as retained keys. Tune this with `-compaction-interval`,

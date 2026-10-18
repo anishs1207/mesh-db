@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ const (
 	walName       = "meshdb.wal"
 	headerSize    = 8
 	maxRecordSize = 16 << 20
+	walFormat     = 1
 )
 
 // Value is a versioned database value. Version and Origin form a total order.
@@ -31,7 +33,8 @@ type Value struct {
 }
 
 type walRecord struct {
-	Key string `json:"key"`
+	Format uint8  `json:"format,omitempty"`
+	Key    string `json:"key"`
 	Value
 }
 
@@ -124,8 +127,8 @@ func (s *Store) recover() error {
 		if crc32.ChecksumIEEE(payload) != checksum {
 			return fmt.Errorf("WAL checksum mismatch at offset %d", validOffset)
 		}
-		var record walRecord
-		if err := json.Unmarshal(payload, &record); err != nil {
+		record, err := decodeRecord(payload)
+		if err != nil {
 			return fmt.Errorf("decode WAL record at offset %d: %w", validOffset, err)
 		}
 		s.apply(record.Key, record.Value)
@@ -133,6 +136,26 @@ func (s *Store) recover() error {
 		validOffset += int64(headerSize) + int64(length)
 	}
 	return nil
+}
+
+func decodeRecord(payload []byte) (walRecord, error) {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var record walRecord
+	if err := decoder.Decode(&record); err != nil {
+		return walRecord{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return walRecord{}, fmt.Errorf("multiple JSON values in WAL record")
+		}
+		return walRecord{}, fmt.Errorf("trailing WAL data: %w", err)
+	}
+	if record.Format != 0 && record.Format != walFormat {
+		return walRecord{}, fmt.Errorf("unsupported WAL format %d", record.Format)
+	}
+	return record, nil
 }
 
 // Set durably appends value before publishing it in memory. It returns false
@@ -175,7 +198,7 @@ func (s *Store) rollbackAppend(offset int64, cause error) error {
 }
 
 func appendRecord(w io.Writer, key string, value Value) error {
-	payload, err := json.Marshal(walRecord{Key: key, Value: value})
+	payload, err := json.Marshal(walRecord{Format: walFormat, Key: key, Value: value})
 	if err != nil {
 		return fmt.Errorf("encode WAL record: %w", err)
 	}

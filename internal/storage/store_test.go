@@ -1,11 +1,24 @@
 package storage
 
 import (
+	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func writeFramedPayload(t *testing.T, dir string, payload []byte) {
+	t.Helper()
+	header := make([]byte, headerSize)
+	binary.BigEndian.PutUint32(header[:4], uint32(len(payload)))
+	binary.BigEndian.PutUint32(header[4:], crc32.ChecksumIEEE(payload))
+	if err := os.WriteFile(filepath.Join(dir, walName), append(header, payload...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestRecoveryAndVersionOrdering(t *testing.T) {
 	dir := t.TempDir()
@@ -64,6 +77,45 @@ func TestRecoveryTruncatesTornTail(t *testing.T) {
 	defer store.Close()
 	if got, ok := store.Get("key"); !ok || got.Value != "value" {
 		t.Fatalf("valid record lost: %#v ok=%v", got, ok)
+	}
+}
+
+func TestRecoveryAcceptsLegacyRecordWithoutFormatMarker(t *testing.T) {
+	dir := t.TempDir()
+	payload, err := json.Marshal(struct {
+		Key       string `json:"key"`
+		Value     string `json:"value"`
+		Version   uint64 `json:"version"`
+		Origin    string `json:"origin"`
+		Tombstone bool   `json:"tombstone,omitempty"`
+	}{Key: "legacy", Value: "value", Version: 7, Origin: "old-node"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFramedPayload(t, dir, payload)
+
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if got, ok := store.Get("legacy"); !ok || got.Value != "value" || got.Version != 7 {
+		t.Fatalf("legacy value = %#v, found=%v", got, ok)
+	}
+}
+
+func TestRecoveryRejectsUnknownFormatAndFields(t *testing.T) {
+	for name, payload := range map[string][]byte{
+		"future format": []byte(`{"format":2,"key":"key","version":1,"origin":"node"}`),
+		"unknown field": []byte(`{"format":1,"key":"key","version":1,"origin":"node","future":true}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFramedPayload(t, dir, payload)
+			if _, err := Open(dir); err == nil {
+				t.Fatal("incompatible WAL record was accepted")
+			}
+		})
 	}
 }
 
