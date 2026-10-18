@@ -802,6 +802,18 @@ func handleConnection(conn net.Conn, server *Server) {
 	}
 }
 
+func closeTrackedConnections(connections *sync.Map) int {
+	closed := 0
+	connections.Range(func(key, _ any) bool {
+		if conn, ok := key.(net.Conn); ok {
+			_ = conn.Close()
+			closed++
+		}
+		return true
+	})
+	return closed
+}
+
 func (s *Server) metrics() string {
 	ready := 0
 	if s.stats.ready.Load() {
@@ -1158,6 +1170,7 @@ func main() {
 	}
 	semaphore := make(chan struct{}, *maxConnections)
 	var connections sync.WaitGroup
+	var activeClients sync.Map
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -1170,8 +1183,10 @@ func main() {
 		select {
 		case semaphore <- struct{}{}:
 			connections.Add(1)
+			activeClients.Store(conn, struct{}{})
 			go func() {
 				defer connections.Done()
+				defer activeClients.Delete(conn)
 				defer func() { <-semaphore }()
 				handleConnection(conn, server)
 			}()
@@ -1200,6 +1215,9 @@ func main() {
 	case <-done:
 		log.Print("MeshDB shutdown complete")
 	case <-shutdownCtx.Done():
-		log.Print("MeshDB shutdown deadline reached")
+		closed := closeTrackedConnections(&activeClients)
+		log.Printf("MeshDB shutdown deadline reached; closed %d client connections", closed)
+		<-done
+		log.Print("MeshDB forced shutdown complete")
 	}
 }

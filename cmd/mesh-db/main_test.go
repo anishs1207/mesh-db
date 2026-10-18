@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -602,6 +603,19 @@ func TestBoundedPeerResponseReader(t *testing.T) {
 				t.Fatalf("read = %q, err=%v; want %q", got, err, test.want)
 			}
 		})
+	}
+}
+
+func TestCloseTrackedConnectionsUnblocksClients(t *testing.T) {
+	serverSide, clientSide := net.Pipe()
+	defer clientSide.Close()
+	var tracked sync.Map
+	tracked.Store(serverSide, struct{}{})
+	if closed := closeTrackedConnections(&tracked); closed != 1 {
+		t.Fatalf("closed connections = %d, want 1", closed)
+	}
+	if _, err := clientSide.Write([]byte("PING\n")); err == nil {
+		t.Fatal("client write succeeded after tracked server connection closed")
 	}
 }
 
