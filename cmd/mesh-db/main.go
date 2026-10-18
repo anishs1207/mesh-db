@@ -156,8 +156,17 @@ func (s *Server) owners(key string) []string {
 
 func (s *Server) putReplica(owner, key string, record storage.Value) error {
 	if owner == s.self {
-		_, err := s.store.Set(key, record)
-		return err
+		applied, err := s.store.Set(key, record)
+		if err != nil {
+			return err
+		}
+		if !applied {
+			current, ok := s.store.Get(key)
+			if !ok || current != record {
+				return fmt.Errorf("replica rejected stale write")
+			}
+		}
+		return nil
 	}
 	return replicate(owner, key, record, s.clusterSecret)
 }
@@ -303,6 +312,12 @@ func (s *Server) handleCommand(line string) string {
 		return "PONG"
 
 	case protocol.Set:
+		observed, _, responses, err := s.quorumRead(request.Key)
+		if err != nil {
+			s.stats.quorumFailures.Add(1)
+			return fmt.Sprintf("ERR read_quorum_unavailable responses=%d required=%d", responses, s.readQuorum)
+		}
+		s.observeVersion(observed.Version)
 		record := storage.Value{
 			Value:   request.Value,
 			Version: s.nextVersion(),
@@ -318,6 +333,12 @@ func (s *Server) handleCommand(line string) string {
 		return fmt.Sprintf("OK version=%d acknowledgements=%d", record.Version, acks)
 
 	case protocol.Delete:
+		observed, _, responses, err := s.quorumRead(request.Key)
+		if err != nil {
+			s.stats.quorumFailures.Add(1)
+			return fmt.Sprintf("ERR read_quorum_unavailable responses=%d required=%d", responses, s.readQuorum)
+		}
+		s.observeVersion(observed.Version)
 		record := storage.Value{Version: s.nextVersion(), Origin: s.nodeID, Tombstone: true}
 		acks, failed := s.quorumWrite(request.Key, record)
 		if acks < s.writeQuorum {
@@ -339,8 +360,15 @@ func (s *Server) handleCommand(line string) string {
 		}
 
 		s.observeVersion(request.Version)
-		if _, err := s.store.Set(request.Key, record); err != nil {
+		applied, err := s.store.Set(request.Key, record)
+		if err != nil {
 			return "ERR persistence failure"
+		}
+		if !applied {
+			current, ok := s.store.Get(request.Key)
+			if !ok || current != record {
+				return "STALE"
+			}
 		}
 
 		// A replica does not forward the write again.
@@ -353,8 +381,15 @@ func (s *Server) handleCommand(line string) string {
 		}
 		record := storage.Value{Version: request.Version, Origin: request.Origin, Tombstone: true}
 		s.observeVersion(request.Version)
-		if _, err := s.store.Set(request.Key, record); err != nil {
+		applied, err := s.store.Set(request.Key, record)
+		if err != nil {
 			return "ERR persistence failure"
+		}
+		if !applied {
+			current, ok := s.store.Get(request.Key)
+			if !ok || current != record {
+				return "STALE"
+			}
 		}
 		return "OK"
 

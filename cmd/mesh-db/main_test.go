@@ -190,6 +190,26 @@ func TestQuorumReadDoesNotResurrectDeletedValue(t *testing.T) {
 	}
 }
 
+func TestCoordinatorAdvancesPastRemoteVersionBeforeWrite(t *testing.T) {
+	firstAddress, first := startTestReplica(t)
+	secondAddress, second := startTestReplica(t)
+	first.ring = cluster.NewRing([]string{firstAddress, secondAddress}, 64)
+	first.replicationFactor = 2
+	first.readQuorum = 2
+	first.writeQuorum = 2
+	_, _ = second.store.Set("counter", storage.Value{Value: "old", Version: 50, Origin: "remote"})
+
+	if got := first.handleCommand("SET counter new"); got != "OK version=51 acknowledgements=2" {
+		t.Fatalf("SET after remote version = %q", got)
+	}
+	for name, replica := range map[string]*Server{"first": first, "second": second} {
+		got, ok := replica.store.Get("counter")
+		if !ok || got.Version != 51 || got.Value != "new" {
+			t.Fatalf("%s replica has %#v ok=%v", name, got, ok)
+		}
+	}
+}
+
 func TestOperationsEndpoints(t *testing.T) {
 	server := newTestServer(t)
 	operations := newOperationsServer("127.0.0.1:0", server)
