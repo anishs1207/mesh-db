@@ -43,6 +43,7 @@ type Store struct {
 	walPath    string
 	maxVersion uint64
 	records    uint64
+	closed     bool
 }
 
 // Open recovers a store from dir and opens its WAL for appends.
@@ -139,6 +140,9 @@ func (s *Store) recover() error {
 func (s *Store) Set(key string, value Value) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return false, os.ErrClosed
+	}
 	if current, ok := s.data[key]; ok && !newer(value, current) {
 		return false, nil
 	}
@@ -192,6 +196,9 @@ func appendRecord(w io.Writer, key string, value Value) error {
 func (s *Store) Compact() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return os.ErrClosed
+	}
 
 	dir := filepath.Dir(s.walPath)
 	temp, err := os.CreateTemp(dir, ".meshdb-wal-*.tmp")
@@ -321,6 +328,9 @@ func (s *Store) Entries() map[string]Value {
 func (s *Store) Backup(destination string) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.closed {
+		return os.ErrClosed
+	}
 	if _, err := os.Stat(destination); err == nil {
 		return fmt.Errorf("backup destination already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -376,6 +386,9 @@ func (s *Store) MaxVersion() uint64 {
 func (s *Store) WALStats() (bytes int64, records uint64, liveKeys int, err error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.closed {
+		return 0, 0, 0, os.ErrClosed
+	}
 	info, err := s.wal.Stat()
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("stat WAL: %w", err)
@@ -412,5 +425,6 @@ func (s *Store) Close() error {
 	}
 	err := s.wal.Close()
 	s.wal = nil
+	s.closed = true
 	return err
 }

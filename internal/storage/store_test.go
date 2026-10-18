@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -225,5 +226,30 @@ func TestCompactionEligibilityUsesSizeAndStaleRatio(t *testing.T) {
 	_, records, live, err = store.WALStats()
 	if err != nil || records != 1 || live != 1 {
 		t.Fatalf("post-compact records=%d live=%d err=%v", records, live, err)
+	}
+}
+
+func TestOperationsAfterCloseReturnErrors(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Set("key", Value{Value: "value", Version: 1, Origin: "n"}); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Set after close error = %v", err)
+	}
+	if err := store.Compact(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Compact after close error = %v", err)
+	}
+	if err := store.Backup(filepath.Join(t.TempDir(), "backup.wal")); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Backup after close error = %v", err)
+	}
+	if _, _, _, err := store.WALStats(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("WALStats after close error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("second Close = %v", err)
 	}
 }
