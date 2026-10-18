@@ -87,6 +87,9 @@ func TestCompactPreservesLatestValuesAndShrinksWAL(t *testing.T) {
 	if err := store.Compact(); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.Set("after-compaction", Value{Value: "appended", Version: 102, Origin: "node"}); err != nil {
+		t.Fatal(err)
+	}
 	after, err := os.Stat(filepath.Join(dir, walName))
 	if err != nil {
 		t.Fatal(err)
@@ -108,6 +111,9 @@ func TestCompactPreservesLatestValuesAndShrinksWAL(t *testing.T) {
 	}
 	if got, ok := store.Get("other"); !ok || got.Value != "kept" {
 		t.Fatalf("other value not recovered: %#v ok=%v", got, ok)
+	}
+	if got, ok := store.Get("after-compaction"); !ok || got.Value != "appended" {
+		t.Fatalf("post-compaction append not recovered: %#v ok=%v", got, ok)
 	}
 }
 

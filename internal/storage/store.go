@@ -132,14 +132,31 @@ func (s *Store) Set(key string, value Value) (bool, error) {
 	if current, ok := s.data[key]; ok && !newer(value, current) {
 		return false, nil
 	}
+	offset, err := s.wal.Seek(0, io.SeekEnd)
+	if err != nil {
+		return false, fmt.Errorf("locate WAL append boundary: %w", err)
+	}
 	if err := appendRecord(s.wal, key, value); err != nil {
-		return false, err
+		return false, s.rollbackAppend(offset, err)
 	}
 	if err := s.wal.Sync(); err != nil {
-		return false, fmt.Errorf("sync WAL: %w", err)
+		return false, s.rollbackAppend(offset, fmt.Errorf("sync WAL: %w", err))
 	}
 	s.apply(key, value)
 	return true, nil
+}
+
+func (s *Store) rollbackAppend(offset int64, cause error) error {
+	if err := s.wal.Truncate(offset); err != nil {
+		return fmt.Errorf("%v; WAL rollback failed: %w", cause, err)
+	}
+	if _, err := s.wal.Seek(0, io.SeekEnd); err != nil {
+		return fmt.Errorf("%v; WAL seek after rollback failed: %w", cause, err)
+	}
+	if err := s.wal.Sync(); err != nil {
+		return fmt.Errorf("%v; WAL rollback sync failed: %w", cause, err)
+	}
+	return cause
 }
 
 func appendRecord(w io.Writer, key string, value Value) error {
