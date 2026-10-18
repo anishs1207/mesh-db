@@ -3,6 +3,7 @@
 /mesh-db.exe
 /client
 /client.exe
+/data/
 *.test
 *.prof
 coverage.out

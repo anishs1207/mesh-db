@@ -10,60 +10,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/anishs1207/mesh-db/internal/storage"
 )
-
-// VersionedValue stores a value and the metadata used to compare writes.
-type VersionedValue struct {
-	Value   string
-	Version uint64
-	Origin  string
-}
-
-// Store is our thread-safe in-memory database.
-type Store struct {
-	mu   sync.RWMutex
-	data map[string]VersionedValue
-}
-
-func NewStore() *Store {
-	return &Store{
-		data: make(map[string]VersionedValue),
-	}
-}
-
-// Set keeps the record with the higher version.
-// If versions tie, the lexicographically higher origin wins.
-func (s *Store) Set(key string, incoming VersionedValue) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	current, exists := s.data[key]
-	if exists {
-		if incoming.Version < current.Version {
-			return false
-		}
-
-		if incoming.Version == current.Version &&
-			incoming.Origin <= current.Origin {
-			return false
-		}
-	}
-
-	s.data[key] = incoming
-	return true
-}
-
-func (s *Store) Get(key string) (VersionedValue, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	value, ok := s.data[key]
-	return value, ok
-}
 
 // Server represents one MeshDB node.
 type Server struct {
-	store *Store
+	store *storage.Store
 	peers []string
 
 	// Protects the logical clock shared by concurrent client handlers.
@@ -93,7 +46,7 @@ func (s *Server) observeVersion(version uint64) {
 }
 
 // replicate sends a versioned write to a peer.
-func replicate(peer, key string, record VersionedValue) error {
+func replicate(peer, key string, record storage.Value) error {
 	conn, err := net.DialTimeout("tcp", peer, 2*time.Second)
 	if err != nil {
 		return err
@@ -154,13 +107,15 @@ func (s *Server) handleCommand(line string) string {
 
 		key, value := parts[1], parts[2]
 
-		record := VersionedValue{
+		record := storage.Value{
 			Value:   value,
 			Version: s.nextVersion(),
 			Origin:  s.nodeID,
 		}
 
-		s.store.Set(key, record)
+		if _, err := s.store.Set(key, record); err != nil {
+			return "ERR persistence failure"
+		}
 
 		var failed []string
 		for _, peer := range s.peers {
@@ -187,14 +142,16 @@ func (s *Server) handleCommand(line string) string {
 			return "ERR invalid version"
 		}
 
-		record := VersionedValue{
+		record := storage.Value{
 			Version: version,
 			Origin:  parts[3],
 			Value:   parts[4],
 		}
 
 		s.observeVersion(version)
-		s.store.Set(parts[1], record)
+		if _, err := s.store.Set(parts[1], record); err != nil {
+			return "ERR persistence failure"
+		}
 
 		// A replica does not forward the write again.
 		return "OK"
@@ -250,6 +207,7 @@ func main() {
 		"",
 		"comma-separated peer addresses",
 	)
+	dataDir := flag.String("data-dir", "./data", "directory for durable node data")
 	flag.Parse()
 
 	var peers []string
@@ -260,10 +218,21 @@ func main() {
 		}
 	}
 
+	store, err := storage.Open(*dataDir)
+	if err != nil {
+		log.Fatal("failed to open storage: ", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Printf("failed to close storage: %v", err)
+		}
+	}()
+
 	server := &Server{
-		store:  NewStore(),
+		store:  store,
 		peers:  peers,
 		nodeID: *port,
+		clock:  store.MaxVersion(),
 	}
 
 	listener, err := net.Listen("tcp", ":"+*port)

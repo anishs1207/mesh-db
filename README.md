@@ -16,10 +16,10 @@ SET <key> <value>
 GET <key>
 ```
 
-Start one node:
+Start one node with durable local data:
 
 ```bash
-go run ./cmd/mesh-db -port 7000
+go run ./cmd/mesh-db -port 7000 -data-dir ./data/node-7000
 ```
 
 Start a replicated three-node demonstration:
