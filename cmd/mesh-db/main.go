@@ -45,6 +45,7 @@ type Server struct {
 	clusterSecret     []byte
 	tlsConfig         *tls.Config
 	hints             *hintstore.Store
+	hintBatchSize     int
 
 	// Protects the logical clock shared by concurrent client handlers.
 	clockMu sync.Mutex
@@ -314,7 +315,7 @@ func (s *Server) deliverHints() {
 	if s.hints == nil {
 		return
 	}
-	items, err := s.hints.List()
+	items, err := s.hints.ListLimit(s.hintBatchSize)
 	if err != nil {
 		log.Printf("some hints could not be loaded: %v", err)
 	}
@@ -693,6 +694,7 @@ func main() {
 	repairInterval := flag.Duration("repair-interval", 30*time.Second, "interval between anti-entropy scans (0 disables)")
 	hintInterval := flag.Duration("hint-interval", 5*time.Second, "interval between hinted-handoff retries (0 disables)")
 	hintMaxBytes := flag.Int64("hint-max-bytes", 1<<30, "maximum disk bytes for pending hinted handoff")
+	hintBatchSize := flag.Int("hint-batch-size", 256, "maximum hinted handoff records attempted per retry pass")
 	compactionInterval := flag.Duration("compaction-interval", 5*time.Minute, "interval for checking WAL compaction eligibility (0 disables)")
 	compactionMinBytes := flag.Int64("compaction-min-bytes", 256<<20, "minimum WAL size before automatic compaction")
 	compactionStaleRatio := flag.Float64("compaction-stale-ratio", 2, "minimum WAL records per live key before automatic compaction")
@@ -700,7 +702,7 @@ func main() {
 	tlsKeyFile := flag.String("tls-key", "", "PEM private key for mutually authenticated TLS")
 	tlsCAFile := flag.String("tls-ca", "", "PEM CA used to verify clients and peers")
 	flag.Parse()
-	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 || *compactionInterval < 0 || *compactionMinBytes <= 0 || *compactionStaleRatio < 1 {
+	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 || *hintBatchSize <= 0 || *compactionInterval < 0 || *compactionMinBytes <= 0 || *compactionStaleRatio < 1 {
 		log.Fatal("connection limit and timeouts must be positive")
 	}
 
@@ -804,6 +806,7 @@ func main() {
 		clusterSecret:     clusterSecret,
 		tlsConfig:         tlsConfig,
 		hints:             hints,
+		hintBatchSize:     *hintBatchSize,
 	}
 
 	listener, err := net.Listen("tcp", ":"+*port)

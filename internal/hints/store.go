@@ -110,6 +110,12 @@ func (s *Store) Put(owner, key string, value storage.Value) error {
 }
 
 func (s *Store) List() ([]Hint, error) {
+	return s.ListLimit(0)
+}
+
+// ListLimit returns at most limit valid hints in stable filename order. A
+// non-positive limit preserves the unbounded behavior for administrative use.
+func (s *Store) ListLimit(limit int) ([]Hint, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entries, err := os.ReadDir(s.dir)
@@ -119,6 +125,9 @@ func (s *Store) List() ([]Hint, error) {
 	var result []Hint
 	var decodeErrors []error
 	for _, entry := range entries {
+		if limit > 0 && len(result) >= limit {
+			break
+		}
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}

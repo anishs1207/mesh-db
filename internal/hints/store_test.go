@@ -1,6 +1,7 @@
 package hints
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,6 +73,29 @@ func TestDeleteRejectsNonHexHintID(t *testing.T) {
 	}
 	if err := store.Delete(strings.Repeat("/", 64)); err == nil {
 		t.Fatal("expected non-hex id rejection")
+	}
+}
+
+func TestListLimitBoundsDecodedHints(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := uint64(1); version <= 5; version++ {
+		if err := store.Put("owner", fmt.Sprintf("key-%d", version), storage.Value{Value: "v", Version: version, Origin: "n"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := store.ListLimit(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("limited items = %d", len(items))
+	}
+	all, err := store.List()
+	if err != nil || len(all) != 5 {
+		t.Fatalf("all items = %d err=%v", len(all), err)
 	}
 }
 

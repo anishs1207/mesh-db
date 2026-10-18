@@ -80,6 +80,8 @@ coordinator restart and are removed only after the target acknowledges them.
 Pending hints are capped at 1 GiB by default with `-hint-max-bytes`; current and
 maximum usage are exported as metrics. Capacity exhaustion is logged and
 anti-entropy remains the fallback repair mechanism.
+Retry scans decode at most 256 records per pass by default, bounded by
+`-hint-batch-size`, so a large backlog cannot be loaded into memory at once.
 
 ## Containerized three-node cluster
 
