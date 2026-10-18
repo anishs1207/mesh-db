@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"flag"
@@ -39,6 +41,7 @@ type Server struct {
 	writeTimeout      time.Duration
 	stats             serverStats
 	clusterSecret     []byte
+	tlsConfig         *tls.Config
 
 	// Protects the logical clock shared by concurrent client handlers.
 	clockMu sync.Mutex
@@ -98,8 +101,22 @@ func verifyInternal(signature, command string, secret []byte) bool {
 }
 
 // replicate sends an authenticated versioned write to a peer.
-func replicate(peer, key string, record storage.Value, secret []byte) error {
-	conn, err := net.DialTimeout("tcp", peer, 2*time.Second)
+func dialPeer(peer string, tlsConfig *tls.Config) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	if tlsConfig == nil {
+		return dialer.Dial("tcp", peer)
+	}
+	config := tlsConfig.Clone()
+	host, _, err := net.SplitHostPort(peer)
+	if err != nil {
+		return nil, fmt.Errorf("invalid peer address: %w", err)
+	}
+	config.ServerName = host
+	return tls.DialWithDialer(dialer, "tcp", peer, config)
+}
+
+func replicate(peer, key string, record storage.Value, secret []byte, tlsConfig *tls.Config) error {
+	conn, err := dialPeer(peer, tlsConfig)
 	if err != nil {
 		return err
 	}
@@ -171,11 +188,11 @@ func (s *Server) putReplica(owner, key string, record storage.Value) error {
 		}
 		return nil
 	}
-	return replicate(owner, key, record, s.clusterSecret)
+	return replicate(owner, key, record, s.clusterSecret, s.tlsConfig)
 }
 
-func fetchReplica(peer, key string, secret []byte) (storage.Value, bool, error) {
-	conn, err := net.DialTimeout("tcp", peer, 2*time.Second)
+func fetchReplica(peer, key string, secret []byte, tlsConfig *tls.Config) (storage.Value, bool, error) {
+	conn, err := dialPeer(peer, tlsConfig)
 	if err != nil {
 		return storage.Value{}, false, err
 	}
@@ -226,7 +243,35 @@ func (s *Server) getReplica(owner, key string) (storage.Value, bool, error) {
 		value, ok := s.store.Get(key)
 		return value, ok, nil
 	}
-	return fetchReplica(owner, key, s.clusterSecret)
+	return fetchReplica(owner, key, s.clusterSecret, s.tlsConfig)
+}
+
+func loadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
+	if certFile == "" && keyFile == "" && caFile == "" {
+		return nil, nil
+	}
+	if certFile == "" || keyFile == "" || caFile == "" {
+		return nil, fmt.Errorf("tls-cert, tls-key, and tls-ca must be configured together")
+	}
+	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS key pair: %w", err)
+	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read TLS CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("TLS CA contains no valid certificates")
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{certificate},
+		RootCAs:      pool,
+		ClientCAs:    pool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		MinVersion:   tls.VersionTLS13,
+	}, nil
 }
 
 func (s *Server) quorumWrite(key string, record storage.Value) (int, []string) {
@@ -569,6 +614,9 @@ func main() {
 	operationsAddress := flag.String("operations-address", "", "health and metrics HTTP address (for example 127.0.0.1:9090)")
 	clusterSecretFile := flag.String("cluster-secret-file", "", "path to the shared inter-node authentication secret")
 	repairInterval := flag.Duration("repair-interval", 30*time.Second, "interval between anti-entropy scans (0 disables)")
+	tlsCertFile := flag.String("tls-cert", "", "PEM certificate for mutually authenticated TLS")
+	tlsKeyFile := flag.String("tls-key", "", "PEM private key for mutually authenticated TLS")
+	tlsCAFile := flag.String("tls-ca", "", "PEM CA used to verify clients and peers")
 	flag.Parse()
 	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 {
 		log.Fatal("connection limit and timeouts must be positive")
@@ -594,6 +642,10 @@ func main() {
 	}
 	if len(peers) > 0 && len(clusterSecret) == 0 {
 		log.Fatal("cluster-secret-file is required when peers are configured")
+	}
+	tlsConfig, err := loadTLSConfig(*tlsCertFile, *tlsKeyFile, *tlsCAFile)
+	if err != nil {
+		log.Fatal("failed to configure TLS: ", err)
 	}
 	if *advertise == "" {
 		*advertise = "127.0.0.1:" + *port
@@ -655,11 +707,15 @@ func main() {
 		readTimeout:       *readTimeout,
 		writeTimeout:      *writeTimeout,
 		clusterSecret:     clusterSecret,
+		tlsConfig:         tlsConfig,
 	}
 
 	listener, err := net.Listen("tcp", ":"+*port)
 	if err != nil {
 		log.Fatal("failed to start MeshDB:", err)
+	}
+	if tlsConfig != nil {
+		listener = tls.NewListener(listener, tlsConfig)
 	}
 	log.Printf("MeshDB node %s listening on port %s (advertise %s)", server.nodeID, *port, *advertise)
 	log.Printf("Configured peers: %v", peers)

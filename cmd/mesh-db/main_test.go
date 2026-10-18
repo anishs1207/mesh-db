@@ -252,3 +252,12 @@ func TestOperationsEndpoints(t *testing.T) {
 		t.Fatalf("unexpected metrics response: status=%d body=%q", response.Code, response.Body.String())
 	}
 }
+
+func TestTLSConfigurationMustBeComplete(t *testing.T) {
+	if config, err := loadTLSConfig("", "", ""); err != nil || config != nil {
+		t.Fatalf("disabled TLS = %#v, %v", config, err)
+	}
+	if _, err := loadTLSConfig("certificate.pem", "", "ca.pem"); err == nil {
+		t.Fatal("expected partial TLS configuration to fail")
+	}
+}

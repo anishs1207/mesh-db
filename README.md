@@ -36,6 +36,11 @@ contain the same randomly generated secret of at least 32 bytes. Never commit
 that file; local secret files are covered by the `.env` ignore rules when named
 accordingly.
 
+For non-loopback deployments, enable mutually authenticated TLS 1.3 with
+`-tls-cert`, `-tls-key`, and `-tls-ca`. The same CA must trust every client and
+node certificate, and peer certificate DNS/IP names must match advertised
+addresses. Partial TLS configuration is rejected.
+
 Each key is placed on a consistent-hash ring. The defaults use replication
 factor 3 with majority read and write quorums. Override them with
 `-replication-factor`, `-read-quorum`, and `-write-quorum`; MeshDB rejects
