@@ -1,6 +1,3 @@
-# Local planning/prompt files
-/prompt/
-
 # Go build and test artifacts
 /mesh-db
 /mesh-db.exe
@@ -10,6 +7,8 @@
 *.prof
 coverage.out
 coverage.html
+
+./prompts
 
 # Local environment files (keep example templates tracked)
 .env
@@ -24,3 +23,6 @@ coverage.html
 *.swo
 .DS_Store
 Thumbs.db
+
+# Repository-local Go caches used by development and CI
+/.cache/
