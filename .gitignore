@@ -8,7 +8,9 @@
 coverage.out
 coverage.html
 
-./prompts
+# Local build journals (kept on disk, not in Git)
+/prompt/
+/prompts/
 
 # Local environment files (keep example templates tracked)
 .env
