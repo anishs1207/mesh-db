@@ -568,6 +568,10 @@ func (s *Server) metrics() string {
 	if s.stats.ready.Load() {
 		ready = 1
 	}
+	hintBytes, hintMaxBytes := int64(0), int64(0)
+	if s.hints != nil {
+		hintBytes, hintMaxBytes = s.hints.Usage()
+	}
 	return fmt.Sprintf(`# HELP meshdb_ready Whether this node is ready to serve traffic.
 # TYPE meshdb_ready gauge
 meshdb_ready %d
@@ -601,10 +605,16 @@ meshdb_hints_queued_total %d
 # HELP meshdb_hints_delivered_total Persisted replica deliveries completed.
 # TYPE meshdb_hints_delivered_total counter
 meshdb_hints_delivered_total %d
+# HELP meshdb_hint_bytes Bytes consumed by pending hints.
+# TYPE meshdb_hint_bytes gauge
+meshdb_hint_bytes %d
+# HELP meshdb_hint_max_bytes Configured hint storage budget.
+# TYPE meshdb_hint_max_bytes gauge
+meshdb_hint_max_bytes %d
 `, ready, s.stats.activeConnections.Load(), s.stats.totalConnections.Load(),
 		s.stats.commands.Load(), s.stats.commandErrors.Load(), s.stats.quorumFailures.Load(),
 		s.stats.repairScans.Load(), s.stats.repairKeys.Load(), s.stats.repairFailures.Load(),
-		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load())
+		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load(), hintBytes, hintMaxBytes)
 }
 
 func newOperationsServer(address string, server *Server) *http.Server {
@@ -656,11 +666,12 @@ func main() {
 	clusterSecretFile := flag.String("cluster-secret-file", "", "path to the shared inter-node authentication secret")
 	repairInterval := flag.Duration("repair-interval", 30*time.Second, "interval between anti-entropy scans (0 disables)")
 	hintInterval := flag.Duration("hint-interval", 5*time.Second, "interval between hinted-handoff retries (0 disables)")
+	hintMaxBytes := flag.Int64("hint-max-bytes", 1<<30, "maximum disk bytes for pending hinted handoff")
 	tlsCertFile := flag.String("tls-cert", "", "PEM certificate for mutually authenticated TLS")
 	tlsKeyFile := flag.String("tls-key", "", "PEM private key for mutually authenticated TLS")
 	tlsCAFile := flag.String("tls-ca", "", "PEM CA used to verify clients and peers")
 	flag.Parse()
-	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 {
+	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 {
 		log.Fatal("connection limit and timeouts must be positive")
 	}
 
@@ -725,6 +736,7 @@ func main() {
 		_ = store.Close()
 		log.Fatal("failed to open hinted handoff: ", err)
 	}
+	hints.SetMaxBytes(*hintMaxBytes)
 	nodeID, err := identity.LoadOrCreate(*dataDir)
 	if err != nil {
 		_ = store.Close()
