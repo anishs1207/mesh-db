@@ -20,6 +20,7 @@ const (
 	Get
 	Set
 	ReplicaSet
+	ReplicaGet
 )
 
 type Request struct {
@@ -82,6 +83,15 @@ func Parse(line string) (Request, error) {
 			return Request{}, err
 		}
 		return Request{Command: ReplicaSet, Key: fields[0], Version: version, Origin: fields[2], Value: fields[3]}, nil
+	case "REPLICA_GET":
+		key := strings.TrimSpace(rest)
+		if err := validateKey(key); err != nil {
+			return Request{}, fmt.Errorf("usage: REPLICA_GET <key>: %w", err)
+		}
+		if strings.ContainsAny(key, " \t\r\n") {
+			return Request{}, fmt.Errorf("usage: REPLICA_GET <key>: key contains whitespace")
+		}
+		return Request{Command: ReplicaGet, Key: key}, nil
 	default:
 		return Request{}, fmt.Errorf("unknown command")
 	}

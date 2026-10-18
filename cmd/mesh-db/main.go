@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
@@ -11,14 +12,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anishs1207/mesh-db/internal/cluster"
 	"github.com/anishs1207/mesh-db/internal/protocol"
 	"github.com/anishs1207/mesh-db/internal/storage"
 )
 
 // Server represents one MeshDB node.
 type Server struct {
-	store *storage.Store
-	peers []string
+	store             *storage.Store
+	ring              *cluster.Ring
+	self              string
+	replicationFactor int
+	readQuorum        int
+	writeQuorum       int
 
 	// Protects the logical clock shared by concurrent client handlers.
 	clockMu sync.Mutex
@@ -87,6 +93,142 @@ func replicate(peer, key string, record storage.Value) error {
 	return nil
 }
 
+type replicaResult struct {
+	owner string
+	value storage.Value
+	found bool
+	err   error
+}
+
+func newer(incoming, current storage.Value) bool {
+	return incoming.Version > current.Version ||
+		(incoming.Version == current.Version && incoming.Origin > current.Origin)
+}
+
+func (s *Server) owners(key string) []string {
+	if s.ring == nil {
+		return []string{s.self}
+	}
+	return s.ring.Owners(key, s.replicationFactor)
+}
+
+func (s *Server) putReplica(owner, key string, record storage.Value) error {
+	if owner == s.self {
+		_, err := s.store.Set(key, record)
+		return err
+	}
+	return replicate(owner, key, record)
+}
+
+func fetchReplica(peer, key string) (storage.Value, bool, error) {
+	conn, err := net.DialTimeout("tcp", peer, 2*time.Second)
+	if err != nil {
+		return storage.Value{}, false, err
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return storage.Value{}, false, err
+	}
+	if _, err := fmt.Fprintf(conn, "REPLICA_GET %s\n", key); err != nil {
+		return storage.Value{}, false, err
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		return storage.Value{}, false, err
+	}
+	line = strings.TrimSpace(line)
+	if line == "NOT_FOUND" {
+		return storage.Value{}, false, nil
+	}
+	parts := strings.Split(line, " ")
+	if len(parts) != 4 || parts[0] != "VALUE" {
+		return storage.Value{}, false, fmt.Errorf("invalid replica response %q", line)
+	}
+	version, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return storage.Value{}, false, fmt.Errorf("invalid replica version: %w", err)
+	}
+	origin, err := base64.RawStdEncoding.DecodeString(parts[2])
+	if err != nil {
+		return storage.Value{}, false, fmt.Errorf("invalid replica origin: %w", err)
+	}
+	value, err := base64.RawStdEncoding.DecodeString(parts[3])
+	if err != nil {
+		return storage.Value{}, false, fmt.Errorf("invalid replica value: %w", err)
+	}
+	return storage.Value{Version: version, Origin: string(origin), Value: string(value)}, true, nil
+}
+
+func (s *Server) getReplica(owner, key string) (storage.Value, bool, error) {
+	if owner == s.self {
+		value, ok := s.store.Get(key)
+		return value, ok, nil
+	}
+	return fetchReplica(owner, key)
+}
+
+func (s *Server) quorumWrite(key string, record storage.Value) (int, []string) {
+	owners := s.owners(key)
+	results := make(chan replicaResult, len(owners))
+	for _, owner := range owners {
+		go func(owner string) {
+			results <- replicaResult{owner: owner, err: s.putReplica(owner, key, record)}
+		}(owner)
+	}
+	acks := 0
+	var failed []string
+	for range owners {
+		result := <-results
+		if result.err == nil {
+			acks++
+		} else {
+			log.Printf("replication to %s failed: %v", result.owner, result.err)
+			failed = append(failed, result.owner)
+		}
+	}
+	return acks, failed
+}
+
+func (s *Server) quorumRead(key string) (storage.Value, bool, int, error) {
+	owners := s.owners(key)
+	results := make(chan replicaResult, len(owners))
+	for _, owner := range owners {
+		go func(owner string) {
+			value, found, err := s.getReplica(owner, key)
+			results <- replicaResult{owner: owner, value: value, found: found, err: err}
+		}(owner)
+	}
+
+	successes := 0
+	var winner storage.Value
+	foundWinner := false
+	completed := make([]replicaResult, 0, len(owners))
+	for range owners {
+		result := <-results
+		completed = append(completed, result)
+		if result.err != nil {
+			continue
+		}
+		successes++
+		if result.found && (!foundWinner || newer(result.value, winner)) {
+			winner, foundWinner = result.value, true
+		}
+	}
+	if successes < s.readQuorum {
+		return storage.Value{}, false, successes, fmt.Errorf("read quorum unavailable")
+	}
+	if foundWinner {
+		for _, result := range completed {
+			if result.err == nil && (!result.found || newer(winner, result.value)) {
+				if err := s.putReplica(result.owner, key, winner); err != nil {
+					log.Printf("read repair to %s failed: %v", result.owner, err)
+				}
+			}
+		}
+	}
+	return winner, foundWinner, successes, nil
+}
+
 // handleCommand executes a database command.
 func (s *Server) handleCommand(line string) string {
 	request, err := protocol.Parse(line)
@@ -105,24 +247,12 @@ func (s *Server) handleCommand(line string) string {
 			Origin:  s.nodeID,
 		}
 
-		if _, err := s.store.Set(request.Key, record); err != nil {
-			return "ERR persistence failure"
+		acks, failed := s.quorumWrite(request.Key, record)
+		if acks < s.writeQuorum {
+			return fmt.Sprintf("ERR write_quorum_unavailable acknowledgements=%d required=%d failed=%s",
+				acks, s.writeQuorum, strings.Join(failed, ","))
 		}
-
-		var failed []string
-		for _, peer := range s.peers {
-			if err := replicate(peer, request.Key, record); err != nil {
-				log.Printf("replication to %s failed: %v", peer, err)
-				failed = append(failed, peer)
-			}
-		}
-
-		if len(failed) > 0 {
-			return "PARTIAL_OK version=" + strconv.FormatUint(record.Version, 10) +
-				"; replication failed on: " + strings.Join(failed, ", ")
-		}
-
-		return "OK version=" + strconv.FormatUint(record.Version, 10)
+		return fmt.Sprintf("OK version=%d acknowledgements=%d", record.Version, acks)
 
 	case protocol.ReplicaSet:
 		record := storage.Value{
@@ -139,8 +269,20 @@ func (s *Server) handleCommand(line string) string {
 		// A replica does not forward the write again.
 		return "OK"
 
-	case protocol.Get:
+	case protocol.ReplicaGet:
 		record, ok := s.store.Get(request.Key)
+		if !ok {
+			return "NOT_FOUND"
+		}
+		return fmt.Sprintf("VALUE %d %s %s", record.Version,
+			base64.RawStdEncoding.EncodeToString([]byte(record.Origin)),
+			base64.RawStdEncoding.EncodeToString([]byte(record.Value)))
+
+	case protocol.Get:
+		record, ok, responses, err := s.quorumRead(request.Key)
+		if err != nil {
+			return fmt.Sprintf("ERR read_quorum_unavailable responses=%d required=%d", responses, s.readQuorum)
+		}
 		if !ok {
 			return "NOT_FOUND"
 		}
@@ -188,6 +330,10 @@ func main() {
 		"comma-separated peer addresses",
 	)
 	dataDir := flag.String("data-dir", "./data", "directory for durable node data")
+	advertise := flag.String("advertise", "", "address advertised to peers (default 127.0.0.1:<port>)")
+	replicationFactor := flag.Int("replication-factor", 3, "number of owners for each key")
+	readQuorum := flag.Int("read-quorum", 0, "successful replica reads required (default majority)")
+	writeQuorum := flag.Int("write-quorum", 0, "successful replica writes required (default majority)")
 	flag.Parse()
 
 	var peers []string
@@ -196,6 +342,32 @@ func main() {
 		if peer != "" {
 			peers = append(peers, peer)
 		}
+	}
+	if *advertise == "" {
+		*advertise = "127.0.0.1:" + *port
+	}
+	members := append([]string{*advertise}, peers...)
+	ring := cluster.NewRing(members, cluster.DefaultVirtualNodes)
+	effectiveReplication := *replicationFactor
+	if effectiveReplication <= 0 {
+		log.Fatal("replication-factor must be positive")
+	}
+	if effectiveReplication > len(ring.Nodes()) {
+		effectiveReplication = len(ring.Nodes())
+	}
+	majority := effectiveReplication/2 + 1
+	if *readQuorum == 0 {
+		*readQuorum = majority
+	}
+	if *writeQuorum == 0 {
+		*writeQuorum = majority
+	}
+	if *readQuorum < 1 || *writeQuorum < 1 || *readQuorum > effectiveReplication || *writeQuorum > effectiveReplication {
+		log.Fatalf("quorums must be between 1 and effective replication factor %d", effectiveReplication)
+	}
+	if *readQuorum+*writeQuorum <= effectiveReplication {
+		log.Fatalf("read-quorum + write-quorum must exceed replication factor (%d + %d <= %d)",
+			*readQuorum, *writeQuorum, effectiveReplication)
 	}
 
 	store, err := storage.Open(*dataDir)
@@ -209,10 +381,14 @@ func main() {
 	}()
 
 	server := &Server{
-		store:  store,
-		peers:  peers,
-		nodeID: *port,
-		clock:  store.MaxVersion(),
+		store:             store,
+		ring:              ring,
+		self:              *advertise,
+		replicationFactor: effectiveReplication,
+		readQuorum:        *readQuorum,
+		writeQuorum:       *writeQuorum,
+		nodeID:            *advertise,
+		clock:             store.MaxVersion(),
 	}
 
 	listener, err := net.Listen("tcp", ":"+*port)
@@ -223,6 +399,7 @@ func main() {
 
 	log.Printf("MeshDB node %s listening on port %s", server.nodeID, *port)
 	log.Printf("Configured peers: %v", peers)
+	log.Printf("Replication N=%d R=%d W=%d", effectiveReplication, *readQuorum, *writeQuorum)
 
 	for {
 		conn, err := listener.Accept()

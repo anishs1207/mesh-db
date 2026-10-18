@@ -30,4 +30,9 @@ go run ./cmd/mesh-db -port 7001 -peers 127.0.0.1:7000,127.0.0.1:7002
 go run ./cmd/mesh-db -port 7002 -peers 127.0.0.1:7000,127.0.0.1:7001
 ```
 
+Each key is placed on a consistent-hash ring. The defaults use replication
+factor 3 with majority read and write quorums. Override them with
+`-replication-factor`, `-read-quorum`, and `-write-quorum`; MeshDB rejects
+configurations where R + W does not intersect.
+
 Follow the build history in [`prompts/`](prompts/README.md).
