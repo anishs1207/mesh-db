@@ -44,10 +44,14 @@ default and rejects plaintext non-loopback `-listen-address` values unless the
 operator deliberately supplies `-allow-insecure-listen` (intended only for
 isolated development networks).
 
-Each key is placed on a consistent-hash ring. The defaults use replication
-factor 3 with majority read and write quorums. Override them with
+Each key is placed on a consistent-hash ring. Clusters with at least three
+members default to replication factor 3 with majority read and write quorums. Override them with
 `-replication-factor`, `-read-quorum`, and `-write-quorum`; MeshDB rejects
 configurations where R + W does not intersect.
+The replication-factor default of zero means “automatically use up to three”;
+any positive value is strict and startup fails rather than silently reducing it
+when membership is too small. Duplicate and malformed member addresses are
+also rejected.
 
 Authenticated replica traffic is fenced by a fingerprint covering membership,
 virtual-node count, replication factor, and both quorums. Differently configured

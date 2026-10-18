@@ -728,6 +728,45 @@ func topologyFingerprint(ring *cluster.Ring, replicationFactor, readQuorum, writ
 	return hex.EncodeToString(sum[:])
 }
 
+func validateClusterMembers(self string, peers []string) error {
+	seen := make(map[string]string, len(peers)+1)
+	for _, address := range append([]string{self}, peers...) {
+		host, portText, err := net.SplitHostPort(address)
+		if err != nil || strings.TrimSpace(host) == "" {
+			return fmt.Errorf("invalid cluster member address %q", address)
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			return fmt.Errorf("invalid cluster member port in %q", address)
+		}
+		canonical := net.JoinHostPort(strings.ToLower(host), strconv.Itoa(port))
+		if previous, ok := seen[canonical]; ok {
+			return fmt.Errorf("duplicate cluster member %q (also configured as %q)", address, previous)
+		}
+		seen[canonical] = address
+	}
+	return nil
+}
+
+func resolveReplicationFactor(configured, members int) (int, error) {
+	if members <= 0 {
+		return 0, fmt.Errorf("cluster must contain at least one member")
+	}
+	if configured < 0 {
+		return 0, fmt.Errorf("replication-factor cannot be negative")
+	}
+	if configured == 0 {
+		if members < 3 {
+			return members, nil
+		}
+		return 3, nil
+	}
+	if configured > members {
+		return 0, fmt.Errorf("replication-factor %d exceeds unique cluster membership %d", configured, members)
+	}
+	return configured, nil
+}
+
 func handleConnection(conn net.Conn, server *Server) {
 	defer conn.Close()
 	server.stats.activeConnections.Add(1)
@@ -888,7 +927,7 @@ func main() {
 	compactOnStartup := flag.Bool("compact-on-startup", false, "rewrite the WAL with only current values before serving")
 	backupOnStartup := flag.String("backup-on-startup", "", "write a compact backup WAL to this new path before serving")
 	advertise := flag.String("advertise", "", "address advertised to peers (default 127.0.0.1:<port>)")
-	replicationFactor := flag.Int("replication-factor", 3, "number of owners for each key")
+	replicationFactor := flag.Int("replication-factor", 0, "number of owners for each key (0 automatically uses up to 3)")
 	readQuorum := flag.Int("read-quorum", 0, "successful replica reads required (default majority)")
 	writeQuorum := flag.Int("write-quorum", 0, "successful replica writes required (default majority)")
 	maxConnections := flag.Int("max-connections", 1024, "maximum simultaneous client connections")
@@ -940,6 +979,9 @@ func main() {
 	if *advertise == "" {
 		*advertise = "127.0.0.1:" + *port
 	}
+	if err := validateClusterMembers(*advertise, peers); err != nil {
+		log.Fatal(err)
+	}
 	if *listenAddress == "" {
 		*listenAddress = net.JoinHostPort("127.0.0.1", *port)
 	}
@@ -948,12 +990,9 @@ func main() {
 	}
 	members := append([]string{*advertise}, peers...)
 	ring := cluster.NewRing(members, cluster.DefaultVirtualNodes)
-	effectiveReplication := *replicationFactor
-	if effectiveReplication <= 0 {
-		log.Fatal("replication-factor must be positive")
-	}
-	if effectiveReplication > len(ring.Nodes()) {
-		effectiveReplication = len(ring.Nodes())
+	effectiveReplication, err := resolveReplicationFactor(*replicationFactor, len(ring.Nodes()))
+	if err != nil {
+		log.Fatal(err)
 	}
 	majority := effectiveReplication/2 + 1
 	if *readQuorum == 0 {

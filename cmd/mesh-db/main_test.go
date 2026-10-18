@@ -166,6 +166,48 @@ func TestTopologyFingerprintIncludesConsistencyConfiguration(t *testing.T) {
 	}
 }
 
+func TestClusterMembershipValidationRejectsAmbiguity(t *testing.T) {
+	if err := validateClusterMembers("node-a:7000", []string{"node-b:7000", "[::1]:7000"}); err != nil {
+		t.Fatalf("valid members rejected: %v", err)
+	}
+	for name, peers := range map[string][]string{
+		"self repeated":    {"node-a:7000"},
+		"duplicate peer":   {"node-b:7000", "NODE-B:7000"},
+		"missing port":     {"node-b"},
+		"empty host":       {":7000"},
+		"invalid port":     {"node-b:70000"},
+		"non-numeric port": {"node-b:http"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateClusterMembers("node-a:7000", peers); err == nil {
+				t.Fatal("invalid membership accepted")
+			}
+		})
+	}
+}
+
+func TestReplicationFactorResolutionDoesNotSilentlyClamp(t *testing.T) {
+	for _, test := range []struct {
+		configured int
+		members    int
+		want       int
+		wantErr    bool
+	}{
+		{configured: 0, members: 1, want: 1},
+		{configured: 0, members: 5, want: 3},
+		{configured: 2, members: 3, want: 2},
+		{configured: 4, members: 3, wantErr: true},
+		{configured: -1, members: 3, wantErr: true},
+		{configured: 0, members: 0, wantErr: true},
+	} {
+		got, err := resolveReplicationFactor(test.configured, test.members)
+		if (err != nil) != test.wantErr || (!test.wantErr && got != test.want) {
+			t.Errorf("resolveReplicationFactor(%d, %d) = %d, %v; want %d, error=%v",
+				test.configured, test.members, got, err, test.want, test.wantErr)
+		}
+	}
+}
+
 func TestRejectsReplicaCommandForNonOwner(t *testing.T) {
 	server := newTestServer(t)
 	server.self = "node-a"
