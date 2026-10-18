@@ -49,3 +49,17 @@ func TestReplicationFactorIsCappedByNodes(t *testing.T) {
 		t.Fatalf("owners = %v", owners)
 	}
 }
+
+func TestTopologyFingerprintIsDeterministicAndSensitive(t *testing.T) {
+	a := NewRing([]string{"node-c", "node-a", "node-b"}, 64)
+	b := NewRing([]string{"node-b", "node-c", "node-a"}, 64)
+	if a.Fingerprint() != b.Fingerprint() {
+		t.Fatal("equivalent rings have different fingerprints")
+	}
+	if a.Fingerprint() == NewRing([]string{"node-a", "node-b"}, 64).Fingerprint() {
+		t.Fatal("membership change did not change fingerprint")
+	}
+	if a.Fingerprint() == NewRing([]string{"node-a", "node-b", "node-c"}, 128).Fingerprint() {
+		t.Fatal("virtual-node change did not change fingerprint")
+	}
+}

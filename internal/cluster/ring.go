@@ -4,6 +4,7 @@ package cluster
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"sort"
 	"strconv"
 )
@@ -18,8 +19,9 @@ type point struct {
 // Ring is an immutable consistent-hash ring. A node appears at multiple
 // virtual points to reduce placement skew.
 type Ring struct {
-	points []point
-	nodes  []string
+	points       []point
+	nodes        []string
+	virtualNodes int
 }
 
 func NewRing(nodes []string, virtualNodes int) *Ring {
@@ -51,7 +53,7 @@ func NewRing(nodes []string, virtualNodes int) *Ring {
 		}
 		return points[i].hash < points[j].hash
 	})
-	return &Ring{points: points, nodes: sortedNodes}
+	return &Ring{points: points, nodes: sortedNodes, virtualNodes: virtualNodes}
 }
 
 // Owners returns up to replicationFactor distinct owners in ring order.
@@ -84,6 +86,22 @@ func (r *Ring) Owners(key string, replicationFactor int) []string {
 
 func (r *Ring) Nodes() []string {
 	return append([]string(nil), r.nodes...)
+}
+
+// Fingerprint identifies the exact placement topology. It is exchanged with
+// replica commands so nodes with divergent membership cannot silently accept
+// writes under incompatible ownership maps.
+func (r *Ring) Fingerprint() string {
+	hasher := sha256.New()
+	var count [8]byte
+	binary.BigEndian.PutUint64(count[:], uint64(r.virtualNodes))
+	_, _ = hasher.Write(count[:])
+	for _, node := range r.nodes {
+		binary.BigEndian.PutUint64(count[:], uint64(len(node)))
+		_, _ = hasher.Write(count[:])
+		_, _ = hasher.Write([]byte(node))
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 func hash(value string) uint64 {

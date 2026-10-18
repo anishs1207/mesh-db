@@ -2,6 +2,7 @@
 package protocol
 
 import (
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -26,11 +27,12 @@ const (
 )
 
 type Request struct {
-	Command Command
-	Key     string
-	Value   string
-	Version uint64
-	Origin  string
+	Command  Command
+	Key      string
+	Value    string
+	Version  uint64
+	Origin   string
+	Topology string
 }
 
 func Parse(line string) (Request, error) {
@@ -76,52 +78,70 @@ func Parse(line string) (Request, error) {
 		}
 		return Request{Command: Set, Key: key, Value: value}, nil
 	case "REPLICA_SET":
-		fields := strings.SplitN(strings.TrimSpace(rest), " ", 4)
-		if len(fields) != 4 {
-			return Request{}, fmt.Errorf("usage: REPLICA_SET <key> <version> <origin> <value>")
+		fields := strings.SplitN(strings.TrimSpace(rest), " ", 5)
+		if len(fields) != 5 {
+			return Request{}, fmt.Errorf("usage: REPLICA_SET <topology> <key> <version> <origin> <value>")
 		}
-		version, err := strconv.ParseUint(fields[1], 10, 64)
+		if err := validateTopology(fields[0]); err != nil {
+			return Request{}, err
+		}
+		version, err := strconv.ParseUint(fields[2], 10, 64)
 		if err != nil {
 			return Request{}, fmt.Errorf("invalid version")
 		}
-		if err := validateKey(fields[0]); err != nil {
+		if err := validateKey(fields[1]); err != nil {
 			return Request{}, err
 		}
-		if fields[2] == "" || strings.ContainsAny(fields[2], " \t\r\n") {
+		if fields[3] == "" || strings.ContainsAny(fields[3], " \t\r\n") {
 			return Request{}, fmt.Errorf("invalid origin")
 		}
-		if err := validateValue(fields[3]); err != nil {
+		if err := validateValue(fields[4]); err != nil {
 			return Request{}, err
 		}
-		return Request{Command: ReplicaSet, Key: fields[0], Version: version, Origin: fields[2], Value: fields[3]}, nil
+		return Request{Command: ReplicaSet, Topology: fields[0], Key: fields[1], Version: version, Origin: fields[3], Value: fields[4]}, nil
 	case "REPLICA_GET":
-		key := strings.TrimSpace(rest)
+		fields := strings.Fields(rest)
+		if len(fields) != 2 || validateTopology(fields[0]) != nil {
+			return Request{}, fmt.Errorf("usage: REPLICA_GET <topology> <key>")
+		}
+		key := fields[1]
 		if err := validateKey(key); err != nil {
 			return Request{}, fmt.Errorf("usage: REPLICA_GET <key>: %w", err)
 		}
 		if strings.ContainsAny(key, " \t\r\n") {
 			return Request{}, fmt.Errorf("usage: REPLICA_GET <key>: key contains whitespace")
 		}
-		return Request{Command: ReplicaGet, Key: key}, nil
+		return Request{Command: ReplicaGet, Topology: fields[0], Key: key}, nil
 	case "REPLICA_DELETE":
 		fields := strings.Fields(rest)
-		if len(fields) != 3 {
-			return Request{}, fmt.Errorf("usage: REPLICA_DELETE <key> <version> <origin>")
+		if len(fields) != 4 {
+			return Request{}, fmt.Errorf("usage: REPLICA_DELETE <topology> <key> <version> <origin>")
 		}
-		version, err := strconv.ParseUint(fields[1], 10, 64)
+		if err := validateTopology(fields[0]); err != nil {
+			return Request{}, err
+		}
+		version, err := strconv.ParseUint(fields[2], 10, 64)
 		if err != nil {
 			return Request{}, fmt.Errorf("invalid version")
 		}
-		if err := validateKey(fields[0]); err != nil {
+		if err := validateKey(fields[1]); err != nil {
 			return Request{}, err
 		}
-		if fields[2] == "" || strings.ContainsAny(fields[2], " \t\r\n") {
+		if fields[3] == "" || strings.ContainsAny(fields[3], " \t\r\n") {
 			return Request{}, fmt.Errorf("invalid origin")
 		}
-		return Request{Command: ReplicaDelete, Key: fields[0], Version: version, Origin: fields[2]}, nil
+		return Request{Command: ReplicaDelete, Topology: fields[0], Key: fields[1], Version: version, Origin: fields[3]}, nil
 	default:
 		return Request{}, fmt.Errorf("unknown command")
 	}
+}
+
+func validateTopology(topology string) error {
+	decoded, err := hex.DecodeString(topology)
+	if err != nil || len(decoded) != 32 {
+		return fmt.Errorf("invalid topology fingerprint")
+	}
+	return nil
 }
 
 func cutField(input string) (string, string, bool) {

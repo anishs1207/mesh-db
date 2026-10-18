@@ -16,6 +16,7 @@ import (
 )
 
 var testClusterSecret = []byte("test-secret-that-is-at-least-32-bytes-long")
+var testTopology = strings.Repeat("a", 64)
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
@@ -35,6 +36,7 @@ func newTestServer(t *testing.T) *Server {
 		nodeID:            self,
 		clock:             store.MaxVersion(),
 		clusterSecret:     testClusterSecret,
+		topologyID:        testTopology,
 	}
 	t.Cleanup(server.stopBackground)
 	return server
@@ -60,6 +62,7 @@ func startTestReplica(t *testing.T) (string, *Server) {
 		readQuorum:        1,
 		writeQuorum:       1,
 		clusterSecret:     testClusterSecret,
+		topologyID:        testTopology,
 	}
 	done := make(chan struct{})
 	go func() {
@@ -113,7 +116,7 @@ func TestCommandLifecycle(t *testing.T) {
 
 func TestReplicaAdvancesLogicalClock(t *testing.T) {
 	server := newTestServer(t)
-	command := "REPLICA_SET remote 9 peer-a replicated value"
+	command := "REPLICA_SET " + testTopology + " remote 9 peer-a replicated value"
 	if got := server.handleCommand(authenticatedCommand(command, testClusterSecret)); got != "OK" {
 		t.Fatalf("REPLICA_SET = %q", got)
 	}
@@ -124,14 +127,41 @@ func TestReplicaAdvancesLogicalClock(t *testing.T) {
 
 func TestRejectsUnauthenticatedReplicaCommands(t *testing.T) {
 	server := newTestServer(t)
-	if got := server.handleCommand("REPLICA_SET key 999 attacker poisoned"); got != "ERR unauthorized" {
+	if got := server.handleCommand("REPLICA_SET " + testTopology + " key 999 attacker poisoned"); got != "ERR unauthorized" {
 		t.Fatalf("unauthenticated replica write = %q", got)
 	}
 	if _, ok := server.store.Get("key"); ok {
 		t.Fatal("unauthenticated replica write mutated storage")
 	}
-	if got := server.handleCommand("AUTH bad REPLICA_GET key"); got != "ERR unauthorized" {
+	if got := server.handleCommand("AUTH bad REPLICA_GET " + testTopology + " key"); got != "ERR unauthorized" {
 		t.Fatalf("bad signature = %q", got)
+	}
+}
+
+func TestRejectsReplicaCommandFromDifferentTopology(t *testing.T) {
+	server := newTestServer(t)
+	otherTopology := strings.Repeat("b", 64)
+	command := "REPLICA_SET " + otherTopology + " key 1 peer value"
+	if got := server.handleCommand(authenticatedCommand(command, testClusterSecret)); got != "ERR topology_mismatch" {
+		t.Fatalf("mismatched topology response = %q", got)
+	}
+	if _, ok := server.store.Get("key"); ok {
+		t.Fatal("mismatched topology mutated storage")
+	}
+}
+
+func TestTopologyFingerprintIncludesConsistencyConfiguration(t *testing.T) {
+	ring := cluster.NewRing([]string{"a", "b", "c"}, 64)
+	baseline := topologyFingerprint(ring, 3, 2, 2)
+	for name, fingerprint := range map[string]string{
+		"membership":   topologyFingerprint(cluster.NewRing([]string{"a", "b", "d"}, 64), 3, 2, 2),
+		"replication":  topologyFingerprint(ring, 2, 2, 2),
+		"read quorum":  topologyFingerprint(ring, 3, 3, 2),
+		"write quorum": topologyFingerprint(ring, 3, 2, 3),
+	} {
+		if fingerprint == baseline {
+			t.Errorf("%s change did not change topology fingerprint", name)
+		}
 	}
 }
 

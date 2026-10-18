@@ -49,6 +49,12 @@ factor 3 with majority read and write quorums. Override them with
 `-replication-factor`, `-read-quorum`, and `-write-quorum`; MeshDB rejects
 configurations where R + W does not intersect.
 
+Authenticated replica traffic is fenced by a fingerprint covering membership,
+virtual-node count, replication factor, and both quorums. Differently configured
+nodes reject each other before storage mutation; compare startup logs or
+`meshdb_topology_info` when diagnosing a cluster. The topology-fencing protocol
+requires a coordinated restart when upgrading from older builds.
+
 Writes return after the configured quorum acknowledges them; late failures are
 captured by hinted handoff. Reads return immediately when a quorum agrees, but
 wait for reconciliation when replicas disagree so newer values and tombstones

@@ -55,6 +55,7 @@ type Server struct {
 	tlsConfig         *tls.Config
 	hints             *hintstore.Store
 	hintBatchSize     int
+	topologyID        string
 	replicaPut        func(string, string, storage.Value) error
 	replicaGet        func(string, string) (storage.Value, bool, error)
 	backgroundMu      sync.Mutex
@@ -177,7 +178,7 @@ func dialPeer(peer string, tlsConfig *tls.Config) (net.Conn, error) {
 	return tls.DialWithDialer(dialer, "tcp", peer, config)
 }
 
-func replicate(peer, key string, record storage.Value, secret []byte, tlsConfig *tls.Config) error {
+func replicate(peer, topology, key string, record storage.Value, secret []byte, tlsConfig *tls.Config) error {
 	conn, err := dialPeer(peer, tlsConfig)
 	if err != nil {
 		return err
@@ -191,9 +192,9 @@ func replicate(peer, key string, record storage.Value, secret []byte, tlsConfig 
 	writer := bufio.NewWriter(conn)
 	var command string
 	if record.Tombstone {
-		command = fmt.Sprintf("REPLICA_DELETE %s %d %s", key, record.Version, record.Origin)
+		command = fmt.Sprintf("REPLICA_DELETE %s %s %d %s", topology, key, record.Version, record.Origin)
 	} else {
-		command = fmt.Sprintf("REPLICA_SET %s %d %s %s", key, record.Version, record.Origin, record.Value)
+		command = fmt.Sprintf("REPLICA_SET %s %s %d %s %s", topology, key, record.Version, record.Origin, record.Value)
 	}
 	command = authenticatedCommand(command, secret) + "\n"
 
@@ -254,10 +255,10 @@ func (s *Server) putReplica(owner, key string, record storage.Value) error {
 		}
 		return nil
 	}
-	return replicate(owner, key, record, s.clusterSecret, s.tlsConfig)
+	return replicate(owner, s.topologyID, key, record, s.clusterSecret, s.tlsConfig)
 }
 
-func fetchReplica(peer, key string, secret []byte, tlsConfig *tls.Config) (storage.Value, bool, error) {
+func fetchReplica(peer, topology, key string, secret []byte, tlsConfig *tls.Config) (storage.Value, bool, error) {
 	conn, err := dialPeer(peer, tlsConfig)
 	if err != nil {
 		return storage.Value{}, false, err
@@ -266,7 +267,7 @@ func fetchReplica(peer, key string, secret []byte, tlsConfig *tls.Config) (stora
 	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		return storage.Value{}, false, err
 	}
-	command := "REPLICA_GET " + key
+	command := "REPLICA_GET " + topology + " " + key
 	if _, err := fmt.Fprintf(conn, "%s\n", authenticatedCommand(command, secret)); err != nil {
 		return storage.Value{}, false, err
 	}
@@ -311,7 +312,7 @@ func (s *Server) getReplica(owner, key string) (storage.Value, bool, error) {
 		value, ok := s.store.Get(key)
 		return value, ok, nil
 	}
-	return fetchReplica(owner, key, s.clusterSecret, s.tlsConfig)
+	return fetchReplica(owner, s.topologyID, key, s.clusterSecret, s.tlsConfig)
 }
 
 func loadTLSConfig(certFile, keyFile, caFile string) (*tls.Config, error) {
@@ -570,6 +571,10 @@ func (s *Server) handleCommand(line string) string {
 		s.stats.commandErrors.Add(1)
 		return "ERR " + err.Error()
 	}
+	if authorizedInternal && isReplicaCommand(request.Command) && request.Topology != s.topologyID {
+		s.stats.commandErrors.Add(1)
+		return "ERR topology_mismatch"
+	}
 
 	switch request.Command {
 	case protocol.Ping:
@@ -700,6 +705,16 @@ func (s *Server) handleCommand(line string) string {
 	}
 }
 
+func isReplicaCommand(command protocol.Command) bool {
+	return command == protocol.ReplicaSet || command == protocol.ReplicaGet || command == protocol.ReplicaDelete
+}
+
+func topologyFingerprint(ring *cluster.Ring, replicationFactor, readQuorum, writeQuorum int) string {
+	configuration := fmt.Sprintf("%s\x00N=%d\x00R=%d\x00W=%d", ring.Fingerprint(), replicationFactor, readQuorum, writeQuorum)
+	sum := sha256.Sum256([]byte(configuration))
+	return hex.EncodeToString(sum[:])
+}
+
 func handleConnection(conn net.Conn, server *Server) {
 	defer conn.Close()
 	server.stats.activeConnections.Add(1)
@@ -747,6 +762,9 @@ func (s *Server) metrics() string {
 	return fmt.Sprintf(`# HELP meshdb_ready Whether this node is ready to serve traffic.
 # TYPE meshdb_ready gauge
 meshdb_ready %d
+# HELP meshdb_topology_info Active placement and quorum configuration fingerprint.
+# TYPE meshdb_topology_info gauge
+meshdb_topology_info{fingerprint="%s"} 1
 # HELP meshdb_active_connections Current client connections.
 # TYPE meshdb_active_connections gauge
 meshdb_active_connections %d
@@ -787,7 +805,7 @@ meshdb_hint_bytes %d
 # TYPE meshdb_hint_max_bytes gauge
 meshdb_hint_max_bytes %d
 %s
-`, ready, s.stats.activeConnections.Load(), s.stats.totalConnections.Load(),
+`, ready, s.topologyID, s.stats.activeConnections.Load(), s.stats.totalConnections.Load(),
 		s.stats.commands.Load(), s.stats.commandErrors.Load(), s.stats.quorumFailures.Load(),
 		s.stats.repairScans.Load(), s.stats.repairKeys.Load(), s.stats.repairFailures.Load(),
 		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load(), s.stats.hintsSuperseded.Load(), hintBytes, hintMaxBytes,
@@ -988,6 +1006,7 @@ func main() {
 		tlsConfig:         tlsConfig,
 		hints:             hints,
 		hintBatchSize:     *hintBatchSize,
+		topologyID:        topologyFingerprint(ring, effectiveReplication, *readQuorum, *writeQuorum),
 	}
 
 	listener, err := net.Listen("tcp", *listenAddress)
@@ -1000,6 +1019,7 @@ func main() {
 	log.Printf("MeshDB node %s listening on %s (advertise %s)", server.nodeID, *listenAddress, *advertise)
 	log.Printf("Configured peers: %v", peers)
 	log.Printf("Replication N=%d R=%d W=%d", effectiveReplication, *readQuorum, *writeQuorum)
+	log.Printf("Topology fingerprint: %s", server.topologyID)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
