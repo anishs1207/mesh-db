@@ -9,8 +9,10 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -29,6 +31,11 @@ import (
 	"github.com/anishs1207/mesh-db/internal/identity"
 	"github.com/anishs1207/mesh-db/internal/protocol"
 	"github.com/anishs1207/mesh-db/internal/storage"
+)
+
+const (
+	maxReplicaAckBytes      = 4 << 10
+	maxReplicaResponseBytes = 2 << 20
 )
 
 // Server represents one MeshDB node.
@@ -134,6 +141,24 @@ func verifyInternal(signature, command string, secret []byte) bool {
 	return err == nil && hmac.Equal(provided, expected)
 }
 
+func readBoundedLine(reader io.Reader, maxBytes int) (string, error) {
+	if maxBytes <= 0 {
+		return "", fmt.Errorf("invalid line limit %d", maxBytes)
+	}
+	buffered := bufio.NewReaderSize(reader, maxBytes+1)
+	line, err := buffered.ReadSlice('\n')
+	if errors.Is(err, bufio.ErrBufferFull) {
+		return "", fmt.Errorf("response exceeds %d bytes", maxBytes)
+	}
+	if err != nil {
+		return "", err
+	}
+	if len(line)-1 > maxBytes {
+		return "", fmt.Errorf("response exceeds %d bytes", maxBytes)
+	}
+	return strings.TrimSpace(string(line)), nil
+}
+
 // replicate sends an authenticated versioned write to a peer.
 func dialPeer(peer string, tlsConfig *tls.Config) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
@@ -176,12 +201,10 @@ func replicate(peer, key string, record storage.Value, secret []byte, tlsConfig 
 		return err
 	}
 
-	response, err := bufio.NewReader(conn).ReadString('\n')
+	response, err := readBoundedLine(conn, maxReplicaAckBytes)
 	if err != nil {
 		return err
 	}
-
-	response = strings.TrimSpace(response)
 	if response != "OK" {
 		return fmt.Errorf("peer returned %q", response)
 	}
@@ -241,11 +264,10 @@ func fetchReplica(peer, key string, secret []byte, tlsConfig *tls.Config) (stora
 	if _, err := fmt.Fprintf(conn, "%s\n", authenticatedCommand(command, secret)); err != nil {
 		return storage.Value{}, false, err
 	}
-	line, err := bufio.NewReader(conn).ReadString('\n')
+	line, err := readBoundedLine(conn, maxReplicaResponseBytes)
 	if err != nil {
 		return storage.Value{}, false, err
 	}
-	line = strings.TrimSpace(line)
 	if line == "NOT_FOUND" {
 		return storage.Value{}, false, nil
 	}

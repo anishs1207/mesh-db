@@ -82,7 +82,8 @@ Client concurrency and slow connections are bounded by `-max-connections`,
 `-read-timeout`, and `-write-timeout`. SIGINT/SIGTERM stops admission and lets
 in-flight connections drain up to `-shutdown-timeout`. Cancellation-aware
 repair, hinted-handoff, and compaction workers are joined before durable
-storage closes.
+storage closes. Inter-node acknowledgement and value-response frames are also
+size-bounded so a faulty peer cannot force unbounded coordinator allocation.
 
 Nodes perform anti-entropy reconciliation every 30 seconds by default so a
 replica that missed writes can converge without waiting for a client read. Use

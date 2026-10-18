@@ -423,6 +423,30 @@ func TestTLSConfigurationMustBeComplete(t *testing.T) {
 	}
 }
 
+func TestBoundedPeerResponseReader(t *testing.T) {
+	for name, test := range map[string]struct {
+		input   string
+		limit   int
+		want    string
+		wantErr bool
+	}{
+		"normal":            {input: "OK\n", limit: 2, want: "OK"},
+		"exact boundary":    {input: "1234\n", limit: 4, want: "1234"},
+		"oversized":         {input: "12345\n", limit: 4, wantErr: true},
+		"missing delimiter": {input: "OK", limit: 4, wantErr: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := readBoundedLine(strings.NewReader(test.input), test.limit)
+			if test.wantErr && err == nil {
+				t.Fatalf("read = %q, expected error", got)
+			}
+			if !test.wantErr && (err != nil || got != test.want) {
+				t.Fatalf("read = %q, err=%v; want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 func TestPlaintextListenRequiresLoopbackOrExplicitOptIn(t *testing.T) {
 	for _, address := range []string{"127.0.0.1:7000", "[::1]:7000", "localhost:7000"} {
 		if err := validateListenAddress(address, false, false); err != nil {
