@@ -54,6 +54,9 @@ virtual-node count, replication factor, and both quorums. Differently configured
 nodes reject each other before storage mutation; compare startup logs or
 `meshdb_topology_info` when diagnosing a cluster. The topology-fencing protocol
 requires a coordinated restart when upgrading from older builds.
+Receivers also recompute placement and reject replica operations for keys they
+do not own, making routing mistakes visible instead of polluting non-owner
+storage.
 
 Writes return after the configured quorum acknowledges them; late failures are
 captured by hinted handoff. Reads return immediately when a quorum agrees, but

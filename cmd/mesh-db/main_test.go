@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -162,6 +163,31 @@ func TestTopologyFingerprintIncludesConsistencyConfiguration(t *testing.T) {
 		if fingerprint == baseline {
 			t.Errorf("%s change did not change topology fingerprint", name)
 		}
+	}
+}
+
+func TestRejectsReplicaCommandForNonOwner(t *testing.T) {
+	server := newTestServer(t)
+	server.self = "node-a"
+	server.ring = cluster.NewRing([]string{"node-a", "node-b"}, 64)
+	server.replicationFactor = 1
+	key := ""
+	for candidate := 0; candidate < 10000; candidate++ {
+		possible := fmt.Sprintf("key-%d", candidate)
+		if server.owners(possible)[0] == "node-b" {
+			key = possible
+			break
+		}
+	}
+	if key == "" {
+		t.Fatal("failed to find key owned by node-b")
+	}
+	command := "REPLICA_SET " + testTopology + " " + key + " 1 peer value"
+	if got := server.handleCommand(authenticatedCommand(command, testClusterSecret)); got != "ERR not_owner" {
+		t.Fatalf("non-owner response = %q", got)
+	}
+	if _, ok := server.store.Get(key); ok {
+		t.Fatal("non-owner replica command mutated storage")
 	}
 }
 

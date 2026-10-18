@@ -575,6 +575,10 @@ func (s *Server) handleCommand(line string) string {
 		s.stats.commandErrors.Add(1)
 		return "ERR topology_mismatch"
 	}
+	if authorizedInternal && isReplicaCommand(request.Command) && !s.ownsLocally(request.Key) {
+		s.stats.commandErrors.Add(1)
+		return "ERR not_owner"
+	}
 
 	switch request.Command {
 	case protocol.Ping:
@@ -707,6 +711,15 @@ func (s *Server) handleCommand(line string) string {
 
 func isReplicaCommand(command protocol.Command) bool {
 	return command == protocol.ReplicaSet || command == protocol.ReplicaGet || command == protocol.ReplicaDelete
+}
+
+func (s *Server) ownsLocally(key string) bool {
+	for _, owner := range s.owners(key) {
+		if owner == s.self {
+			return true
+		}
+	}
+	return false
 }
 
 func topologyFingerprint(ring *cluster.Ring, replicationFactor, readQuorum, writeQuorum int) string {
