@@ -218,6 +218,9 @@ func appendRecord(w io.Writer, key string, value Value) error {
 	if err != nil {
 		return fmt.Errorf("encode WAL record: %w", err)
 	}
+	if len(payload) == 0 || len(payload) > maxRecordSize {
+		return fmt.Errorf("WAL record size %d exceeds limit %d", len(payload), maxRecordSize)
+	}
 	header := make([]byte, headerSize)
 	binary.BigEndian.PutUint32(header[:4], uint32(len(payload)))
 	binary.BigEndian.PutUint32(header[4:], crc32.ChecksumIEEE(payload))

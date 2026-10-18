@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -77,6 +78,33 @@ func TestRecoveryTruncatesTornTail(t *testing.T) {
 	defer store.Close()
 	if got, ok := store.Get("key"); !ok || got.Value != "value" {
 		t.Fatalf("valid record lost: %#v ok=%v", got, ok)
+	}
+}
+
+func TestOversizedWriteCannotCreateUnreadableWAL(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oversized := Value{Value: strings.Repeat("x", maxRecordSize), Version: 1, Origin: "node"}
+	if applied, err := store.Set("key", oversized); err == nil || applied {
+		t.Fatalf("oversized Set: applied=%v err=%v", applied, err)
+	}
+	if applied, err := store.Set("key", Value{Value: "valid", Version: 2, Origin: "node"}); err != nil || !applied {
+		t.Fatalf("valid Set after rejection: applied=%v err=%v", applied, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after oversized rejection: %v", err)
+	}
+	defer store.Close()
+	if got, ok := store.Get("key"); !ok || got.Value != "valid" {
+		t.Fatalf("recovered value = %#v, found=%v", got, ok)
 	}
 }
 
