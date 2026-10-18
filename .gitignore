@@ -1,0 +1,26 @@
+# Local planning/prompt files
+/prompt/
+
+# Go build and test artifacts
+/mesh-db
+/mesh-db.exe
+/client
+/client.exe
+*.test
+*.prof
+coverage.out
+coverage.html
+
+# Local environment files (keep example templates tracked)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Editor and OS metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
