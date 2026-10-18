@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/anishs1207/mesh-db/internal/fsutil"
@@ -115,6 +117,7 @@ func (s *Store) List() ([]Hint, error) {
 		return nil, err
 	}
 	var result []Hint
+	var decodeErrors []error
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -125,18 +128,24 @@ func (s *Store) List() ([]Hint, error) {
 		}
 		var hint Hint
 		if err := json.Unmarshal(data, &hint); err != nil {
-			return nil, fmt.Errorf("decode hint %s: %w", entry.Name(), err)
+			decodeErrors = append(decodeErrors, fmt.Errorf("decode hint %s: %w", entry.Name(), err))
+			continue
+		}
+		fileID := strings.TrimSuffix(entry.Name(), ".json")
+		if !validID(fileID) || hint.ID != fileID {
+			decodeErrors = append(decodeErrors, fmt.Errorf("hint %s has mismatched or invalid id", entry.Name()))
+			continue
 		}
 		result = append(result, hint)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
-	return result, nil
+	return result, errors.Join(decodeErrors...)
 }
 
 func (s *Store) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(id) != 64 {
+	if !validID(id) {
 		return fmt.Errorf("invalid hint id")
 	}
 	path := filepath.Join(s.dir, id+".json")
@@ -158,4 +167,12 @@ func (s *Store) Delete(id string) error {
 		}
 	}
 	return err
+}
+
+func validID(id string) bool {
+	if len(id) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(id)
+	return err == nil && len(decoded) == sha256.Size
 }

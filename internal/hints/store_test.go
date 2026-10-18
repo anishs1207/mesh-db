@@ -1,6 +1,9 @@
 package hints
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/anishs1207/mesh-db/internal/storage"
@@ -36,6 +39,39 @@ func TestHintsSurviveReopenAndDeduplicate(t *testing.T) {
 	items, err = store.List()
 	if err != nil || len(items) != 0 {
 		t.Fatalf("after delete: %#v %v", items, err)
+	}
+}
+
+func TestCorruptHintDoesNotBlockHealthyDelivery(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := storage.Value{Value: "healthy", Version: 3, Origin: "n"}
+	if err := store.Put("owner", "key", value); err != nil {
+		t.Fatal(err)
+	}
+	corruptID := strings.Repeat("a", 64)
+	if err := os.WriteFile(filepath.Join(dir, corruptID+".json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.List()
+	if err == nil {
+		t.Fatal("expected corrupt hint diagnostic")
+	}
+	if len(items) != 1 || items[0].Value != value {
+		t.Fatalf("healthy hints were lost: %#v", items)
+	}
+}
+
+func TestDeleteRejectsNonHexHintID(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(strings.Repeat("/", 64)); err == nil {
+		t.Fatal("expected non-hex id rejection")
 	}
 }
 

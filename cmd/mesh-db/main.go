@@ -316,8 +316,7 @@ func (s *Server) deliverHints() {
 	}
 	items, err := s.hints.List()
 	if err != nil {
-		log.Printf("list hints failed: %v", err)
-		return
+		log.Printf("some hints could not be loaded: %v", err)
 	}
 	for _, hint := range items {
 		if err := s.putReplica(hint.Owner, hint.Key, hint.Value); err != nil {
