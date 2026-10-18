@@ -23,5 +23,9 @@ jobs:
         run: go vet ./...
       - name: Test with race detector
         run: go test -race -count=1 ./...
+      - name: Fuzz protocol boundary
+        run: go test -run=^$ -fuzz=FuzzParse -fuzztime=10s ./internal/protocol
+      - name: Fuzz WAL recovery
+        run: go test -run=^$ -fuzz=FuzzWALRecovery -fuzztime=10s ./internal/storage
       - name: Build static binary
         run: CGO_ENABLED=0 go build -trimpath -o mesh-db ./cmd/mesh-db
