@@ -103,6 +103,9 @@ Hints rejected because a replica already stores newer state are retired instead
 of consuming retry capacity forever, and are counted separately in metrics.
 Bounded scans rotate through the backlog so unavailable early entries cannot
 starve healthy deliveries later in filename order.
+Repeated failures for the same replica and key are coalesced to the newest
+version, preventing hot keys from filling the repair budget with obsolete
+history during an extended outage.
 
 ## Containerized three-node cluster
 

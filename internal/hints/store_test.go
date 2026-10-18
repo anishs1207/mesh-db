@@ -44,6 +44,39 @@ func TestHintsSurviveReopenAndDeduplicate(t *testing.T) {
 	}
 }
 
+func TestPutCoalescesVersionsForOwnerAndKey(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []storage.Value{
+		{Value: "first", Version: 1, Origin: "node"},
+		{Value: "newest", Version: 3, Origin: "node"},
+		{Value: "obsolete", Version: 2, Origin: "node"},
+	} {
+		if err := store.Put("owner", "hot-key", value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := store.List()
+	if err != nil || len(items) != 1 || items[0].Value.Version != 3 || items[0].Value.Value != "newest" {
+		t.Fatalf("coalesced hints = %#v, err=%v", items, err)
+	}
+
+	store, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put("owner", "hot-key", storage.Value{Value: "after restart", Version: 4, Origin: "node"}); err != nil {
+		t.Fatal(err)
+	}
+	items, err = store.List()
+	if err != nil || len(items) != 1 || items[0].Value.Version != 4 {
+		t.Fatalf("post-restart hints = %#v, err=%v", items, err)
+	}
+}
+
 func TestCorruptHintDoesNotBlockHealthyDelivery(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)

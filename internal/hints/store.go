@@ -35,6 +35,12 @@ type Store struct {
 	used       int64
 	maxBytes   int64
 	scanCursor string
+	latest     map[string]storedHint
+}
+
+type storedHint struct {
+	hint Hint
+	size int64
 }
 
 func Open(dir string) (*Store, error) {
@@ -46,6 +52,7 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	var used int64
+	latest := make(map[string]storedHint)
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -55,8 +62,21 @@ func Open(dir string) (*Store, error) {
 			return nil, err
 		}
 		used += info.Size()
+		data, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if readErr != nil {
+			return nil, readErr
+		}
+		hint, decodeErr := validatedHint(entry.Name(), data)
+		if decodeErr != nil {
+			continue
+		}
+		slot := hintSlot(hint.Owner, hint.Key)
+		current, ok := latest[slot]
+		if !ok || newerHint(hint, current.hint) {
+			latest[slot] = storedHint{hint: hint, size: info.Size()}
+		}
 	}
-	return &Store{dir: dir, used: used}, nil
+	return &Store{dir: dir, used: used, latest: latest}, nil
 }
 
 func (s *Store) SetMaxBytes(maxBytes int64) { s.mu.Lock(); s.maxBytes = maxBytes; s.mu.Unlock() }
@@ -70,17 +90,24 @@ func (s *Store) Usage() (used, maximum int64) {
 func (s *Store) Put(owner, key string, value storage.Value) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := contentID(owner, key, value)
-	target := filepath.Join(s.dir, id+".json")
-	if _, err := os.Stat(target); err == nil {
+	slot := hintSlot(owner, key)
+	previous, hasPrevious := s.latest[slot]
+	incoming := Hint{Format: hintFormat, Owner: owner, Key: key, Value: value}
+	if hasPrevious && !newerHint(incoming, previous.hint) {
 		return nil
 	}
+	id := contentID(owner, key, value)
+	target := filepath.Join(s.dir, id+".json")
 	hint := Hint{Format: hintFormat, ID: id, Owner: owner, Key: key, Value: value}
 	data, err := json.Marshal(hint)
 	if err != nil {
 		return fmt.Errorf("encode hint: %w", err)
 	}
-	if s.maxBytes > 0 && s.used+int64(len(data)) > s.maxBytes {
+	projected := s.used + int64(len(data))
+	if hasPrevious {
+		projected -= previous.size
+	}
+	if s.maxBytes > 0 && projected > s.maxBytes {
 		return fmt.Errorf("hint capacity exceeded: used=%d limit=%d", s.used, s.maxBytes)
 	}
 	temp, err := os.CreateTemp(s.dir, ".hint-*.tmp")
@@ -111,6 +138,17 @@ func (s *Store) Put(owner, key string, value storage.Value) error {
 		return fmt.Errorf("persist hint directory entry: %w", err)
 	}
 	s.used += int64(len(data))
+	s.latest[slot] = storedHint{hint: hint, size: int64(len(data))}
+	if hasPrevious && previous.hint.ID != id {
+		oldPath := filepath.Join(s.dir, previous.hint.ID+".json")
+		if err := os.Remove(oldPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove superseded hint: %w", err)
+		}
+		if err := fsutil.SyncDir(s.dir); err != nil {
+			return fmt.Errorf("persist superseded hint removal: %w", err)
+		}
+		s.used -= previous.size
+	}
 	return nil
 }
 
@@ -151,28 +189,41 @@ func (s *Store) ListLimit(limit int) ([]Hint, error) {
 		if err != nil {
 			return nil, err
 		}
-		hint, err := decodeHint(data)
+		hint, err := validatedHint(entry.Name(), data)
 		if err != nil {
 			decodeErrors = append(decodeErrors, fmt.Errorf("decode hint %s: %w", entry.Name(), err))
-			continue
-		}
-		fileID := strings.TrimSuffix(entry.Name(), ".json")
-		if !validID(fileID) || hint.ID != fileID {
-			decodeErrors = append(decodeErrors, fmt.Errorf("hint %s has mismatched or invalid id", entry.Name()))
-			continue
-		}
-		expectedID := contentID(hint.Owner, hint.Key, hint.Value)
-		if hint.Format == 0 {
-			expectedID = legacyID(hint.Owner, hint.Key, hint.Value)
-		}
-		if hint.ID != expectedID {
-			decodeErrors = append(decodeErrors, fmt.Errorf("hint %s failed content identity validation", entry.Name()))
 			continue
 		}
 		result = append(result, hint)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, errors.Join(decodeErrors...)
+}
+
+func validatedHint(name string, data []byte) (Hint, error) {
+	hint, err := decodeHint(data)
+	if err != nil {
+		return Hint{}, err
+	}
+	fileID := strings.TrimSuffix(name, ".json")
+	if !validID(fileID) || hint.ID != fileID {
+		return Hint{}, fmt.Errorf("mismatched or invalid id")
+	}
+	expectedID := contentID(hint.Owner, hint.Key, hint.Value)
+	if hint.Format == 0 {
+		expectedID = legacyID(hint.Owner, hint.Key, hint.Value)
+	}
+	if hint.ID != expectedID {
+		return Hint{}, fmt.Errorf("failed content identity validation")
+	}
+	return hint, nil
+}
+
+func hintSlot(owner, key string) string { return owner + "\x00" + key }
+
+func newerHint(incoming, current Hint) bool {
+	return incoming.Value.Version > current.Value.Version ||
+		(incoming.Value.Version == current.Value.Version && incoming.Value.Origin > current.Value.Origin)
 }
 
 func decodeHint(data []byte) (Hint, error) {
@@ -230,6 +281,12 @@ func (s *Store) Delete(id string) error {
 	}
 	if err == nil {
 		s.used -= info.Size()
+		for slot, stored := range s.latest {
+			if stored.hint.ID == id {
+				delete(s.latest, slot)
+				break
+			}
+		}
 		if syncErr := fsutil.SyncDir(s.dir); syncErr != nil {
 			return fmt.Errorf("persist hint deletion: %w", syncErr)
 		}
