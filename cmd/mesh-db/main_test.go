@@ -337,6 +337,36 @@ func TestHintedHandoffDeliversPersistedMutation(t *testing.T) {
 	}
 }
 
+func TestHintedHandoffDeletesSupersededMutation(t *testing.T) {
+	_, coordinator := startTestReplica(t)
+	ownerAddress, owner := startTestReplica(t)
+	hints, err := hintstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinator.hints = hints
+	newerValue := storage.Value{Value: "newer", Version: 13, Origin: "node-b"}
+	if _, err := owner.store.Set("key", newerValue); err != nil {
+		t.Fatal(err)
+	}
+	obsolete := storage.Value{Value: "obsolete", Version: 12, Origin: "node-a"}
+	if err := hints.Put(ownerAddress, "key", obsolete); err != nil {
+		t.Fatal(err)
+	}
+
+	coordinator.deliverHints()
+	items, err := hints.List()
+	if err != nil || len(items) != 0 {
+		t.Fatalf("obsolete hint retained: %#v err=%v", items, err)
+	}
+	if got, _ := owner.store.Get("key"); got != newerValue {
+		t.Fatalf("newer replica value changed: %#v", got)
+	}
+	if coordinator.stats.hintsSuperseded.Load() != 1 {
+		t.Fatalf("superseded metric = %d", coordinator.stats.hintsSuperseded.Load())
+	}
+}
+
 func TestHintDeliveryStopsAfterCancellation(t *testing.T) {
 	server := newTestServer(t)
 	hints, err := hintstore.Open(t.TempDir())

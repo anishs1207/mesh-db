@@ -99,6 +99,8 @@ maximum usage are exported as metrics. Capacity exhaustion is logged and
 anti-entropy remains the fallback repair mechanism.
 Retry scans decode at most 256 records per pass by default, bounded by
 `-hint-batch-size`, so a large backlog cannot be loaded into memory at once.
+Hints rejected because a replica already stores newer state are retired instead
+of consuming retry capacity forever, and are counted separately in metrics.
 
 ## Containerized three-node cluster
 

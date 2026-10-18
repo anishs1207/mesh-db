@@ -38,6 +38,8 @@ const (
 	maxReplicaResponseBytes = 2 << 20
 )
 
+var errReplicaSuperseded = errors.New("replica already stores a newer value")
+
 // Server represents one MeshDB node.
 type Server struct {
 	store             *storage.Store
@@ -98,6 +100,7 @@ type serverStats struct {
 	repairFailures     atomic.Uint64
 	hintsQueued        atomic.Uint64
 	hintsDelivered     atomic.Uint64
+	hintsSuperseded    atomic.Uint64
 	compactions        atomic.Uint64
 	compactionFailures atomic.Uint64
 }
@@ -206,6 +209,9 @@ func replicate(peer, key string, record storage.Value, secret []byte, tlsConfig 
 		return err
 	}
 	if response != "OK" {
+		if response == "STALE" {
+			return errReplicaSuperseded
+		}
 		return fmt.Errorf("peer returned %q", response)
 	}
 
@@ -243,7 +249,7 @@ func (s *Server) putReplica(owner, key string, record storage.Value) error {
 		if !applied {
 			current, ok := s.store.Get(key)
 			if !ok || current != record {
-				return fmt.Errorf("replica rejected stale write")
+				return errReplicaSuperseded
 			}
 		}
 		return nil
@@ -370,7 +376,7 @@ func (s *Server) quorumWrite(key string, record storage.Value) (int, []string) {
 		} else {
 			log.Printf("replication to %s failed: %v", result.owner, result.err)
 			failed = append(failed, result.owner)
-			if s.hints != nil {
+			if s.hints != nil && !errors.Is(result.err, errReplicaSuperseded) {
 				if err := s.hints.Put(result.owner, key, record); err != nil {
 					log.Printf("persist hint for %s failed: %v", result.owner, err)
 				} else {
@@ -402,7 +408,7 @@ func (s *Server) drainWriteResults(results <-chan replicaResult, remaining int, 
 			continue
 		}
 		log.Printf("replication to %s failed after quorum: %v", result.owner, result.err)
-		if s.hints == nil {
+		if s.hints == nil || errors.Is(result.err, errReplicaSuperseded) {
 			continue
 		}
 		if err := s.hints.Put(result.owner, key, record); err != nil {
@@ -430,6 +436,14 @@ func (s *Server) deliverHintsContext(ctx context.Context) {
 			return
 		}
 		if err := s.putReplica(hint.Owner, hint.Key, hint.Value); err != nil {
+			if !errors.Is(err, errReplicaSuperseded) {
+				continue
+			}
+			if err := s.hints.Delete(hint.ID); err != nil {
+				log.Printf("delete superseded hint failed: %v", err)
+				continue
+			}
+			s.stats.hintsSuperseded.Add(1)
 			continue
 		}
 		if err := s.hints.Delete(hint.ID); err != nil {
@@ -763,6 +777,9 @@ meshdb_hints_queued_total %d
 # HELP meshdb_hints_delivered_total Persisted replica deliveries completed.
 # TYPE meshdb_hints_delivered_total counter
 meshdb_hints_delivered_total %d
+# HELP meshdb_hints_superseded_total Persisted deliveries discarded because the replica already had newer state.
+# TYPE meshdb_hints_superseded_total counter
+meshdb_hints_superseded_total %d
 # HELP meshdb_hint_bytes Bytes consumed by pending hints.
 # TYPE meshdb_hint_bytes gauge
 meshdb_hint_bytes %d
@@ -773,7 +790,7 @@ meshdb_hint_max_bytes %d
 `, ready, s.stats.activeConnections.Load(), s.stats.totalConnections.Load(),
 		s.stats.commands.Load(), s.stats.commandErrors.Load(), s.stats.quorumFailures.Load(),
 		s.stats.repairScans.Load(), s.stats.repairKeys.Load(), s.stats.repairFailures.Load(),
-		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load(), hintBytes, hintMaxBytes,
+		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load(), s.stats.hintsSuperseded.Load(), hintBytes, hintMaxBytes,
 		s.storageMetrics())
 }
 
