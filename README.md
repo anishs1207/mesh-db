@@ -101,6 +101,8 @@ Retry scans decode at most 256 records per pass by default, bounded by
 `-hint-batch-size`, so a large backlog cannot be loaded into memory at once.
 Hints rejected because a replica already stores newer state are retired instead
 of consuming retry capacity forever, and are counted separately in metrics.
+Bounded scans rotate through the backlog so unavailable early entries cannot
+starve healthy deliveries later in filename order.
 
 ## Containerized three-node cluster
 

@@ -30,10 +30,11 @@ type Hint struct {
 }
 
 type Store struct {
-	dir      string
-	mu       sync.Mutex
-	used     int64
-	maxBytes int64
+	dir        string
+	mu         sync.Mutex
+	used       int64
+	maxBytes   int64
+	scanCursor string
 }
 
 func Open(dir string) (*Store, error) {
@@ -126,14 +127,25 @@ func (s *Store) ListLimit(limit int) ([]Hint, error) {
 	if err != nil {
 		return nil, err
 	}
+	files := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
+			files = append(files, entry)
+		}
+	}
+	start := 0
+	if limit > 0 && s.scanCursor != "" {
+		start = sort.Search(len(files), func(i int) bool { return files[i].Name() > s.scanCursor })
+		if start == len(files) {
+			start = 0
+		}
+	}
 	var result []Hint
 	var decodeErrors []error
-	for _, entry := range entries {
-		if limit > 0 && len(result) >= limit {
-			break
-		}
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
+	for visited := 0; visited < len(files) && (limit <= 0 || len(result) < limit); visited++ {
+		entry := files[(start+visited)%len(files)]
+		if limit > 0 {
+			s.scanCursor = entry.Name()
 		}
 		data, err := os.ReadFile(filepath.Join(s.dir, entry.Name()))
 		if err != nil {

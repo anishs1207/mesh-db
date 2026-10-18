@@ -150,6 +150,31 @@ func TestListLimitBoundsDecodedHints(t *testing.T) {
 	}
 }
 
+func TestListLimitRotatesAcrossBacklog(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := uint64(1); version <= 5; version++ {
+		if err := store.Put("owner", fmt.Sprintf("key-%d", version), storage.Value{Version: version, Origin: "n"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := make(map[string]struct{})
+	for range 3 {
+		items, err := store.ListLimit(2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range items {
+			seen[item.ID] = struct{}{}
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("rotating batches reached %d hints, want 5", len(seen))
+	}
+}
+
 func TestHintCapacityIsEnforcedAndReclaimed(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

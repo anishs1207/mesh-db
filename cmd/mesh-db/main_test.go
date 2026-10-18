@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -364,6 +365,35 @@ func TestHintedHandoffDeletesSupersededMutation(t *testing.T) {
 	}
 	if coordinator.stats.hintsSuperseded.Load() != 1 {
 		t.Fatalf("superseded metric = %d", coordinator.stats.hintsSuperseded.Load())
+	}
+}
+
+func TestUnavailableHintDoesNotStarveLaterDelivery(t *testing.T) {
+	server := newTestServer(t)
+	hints, err := hintstore.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.hints = hints
+	server.hintBatchSize = 1
+	if err := hints.Put("down", "blocked", storage.Value{Version: 1, Origin: "node"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := hints.Put("up", "healthy", storage.Value{Version: 2, Origin: "node"}); err != nil {
+		t.Fatal(err)
+	}
+	server.replicaPut = func(owner, _ string, _ storage.Value) error {
+		if owner == "down" {
+			return errors.New("unavailable")
+		}
+		return nil
+	}
+
+	server.deliverHints()
+	server.deliverHints()
+	items, err := hints.List()
+	if err != nil || len(items) != 1 || items[0].Owner != "down" {
+		t.Fatalf("remaining hints = %#v, err=%v; want only unavailable owner", items, err)
 	}
 }
 
