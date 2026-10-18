@@ -2,14 +2,19 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/anishs1207/mesh-db/internal/cluster"
@@ -25,11 +30,23 @@ type Server struct {
 	replicationFactor int
 	readQuorum        int
 	writeQuorum       int
+	readTimeout       time.Duration
+	writeTimeout      time.Duration
+	stats             serverStats
 
 	// Protects the logical clock shared by concurrent client handlers.
 	clockMu sync.Mutex
 	clock   uint64
 	nodeID  string
+}
+
+type serverStats struct {
+	commands          atomic.Uint64
+	commandErrors     atomic.Uint64
+	quorumFailures    atomic.Uint64
+	activeConnections atomic.Int64
+	totalConnections  atomic.Uint64
+	ready             atomic.Bool
 }
 
 // nextVersion generates a monotonically increasing local version.
@@ -231,8 +248,10 @@ func (s *Server) quorumRead(key string) (storage.Value, bool, int, error) {
 
 // handleCommand executes a database command.
 func (s *Server) handleCommand(line string) string {
+	s.stats.commands.Add(1)
 	request, err := protocol.Parse(line)
 	if err != nil {
+		s.stats.commandErrors.Add(1)
 		return "ERR " + err.Error()
 	}
 
@@ -249,6 +268,7 @@ func (s *Server) handleCommand(line string) string {
 
 		acks, failed := s.quorumWrite(request.Key, record)
 		if acks < s.writeQuorum {
+			s.stats.quorumFailures.Add(1)
 			return fmt.Sprintf("ERR write_quorum_unavailable acknowledgements=%d required=%d failed=%s",
 				acks, s.writeQuorum, strings.Join(failed, ","))
 		}
@@ -281,6 +301,7 @@ func (s *Server) handleCommand(line string) string {
 	case protocol.Get:
 		record, ok, responses, err := s.quorumRead(request.Key)
 		if err != nil {
+			s.stats.quorumFailures.Add(1)
 			return fmt.Sprintf("ERR read_quorum_unavailable responses=%d required=%d", responses, s.readQuorum)
 		}
 		if !ok {
@@ -301,14 +322,26 @@ func (s *Server) handleCommand(line string) string {
 
 func handleConnection(conn net.Conn, server *Server) {
 	defer conn.Close()
+	server.stats.activeConnections.Add(1)
+	server.stats.totalConnections.Add(1)
+	defer server.stats.activeConnections.Add(-1)
 
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64<<10), protocol.MaxCommandBytes)
 	writer := bufio.NewWriter(conn)
 
-	for scanner.Scan() {
+	for {
+		if server.readTimeout > 0 {
+			_ = conn.SetReadDeadline(time.Now().Add(server.readTimeout))
+		}
+		if !scanner.Scan() {
+			break
+		}
 		response := server.handleCommand(scanner.Text())
 
+		if server.writeTimeout > 0 {
+			_ = conn.SetWriteDeadline(time.Now().Add(server.writeTimeout))
+		}
 		if _, err := fmt.Fprintln(writer, response); err != nil {
 			return
 		}
@@ -319,6 +352,60 @@ func handleConnection(conn net.Conn, server *Server) {
 
 	if err := scanner.Err(); err != nil {
 		log.Println("client read error:", err)
+	}
+}
+
+func (s *Server) metrics() string {
+	ready := 0
+	if s.stats.ready.Load() {
+		ready = 1
+	}
+	return fmt.Sprintf(`# HELP meshdb_ready Whether this node is ready to serve traffic.
+# TYPE meshdb_ready gauge
+meshdb_ready %d
+# HELP meshdb_active_connections Current client connections.
+# TYPE meshdb_active_connections gauge
+meshdb_active_connections %d
+# HELP meshdb_connections_total Accepted client connections.
+# TYPE meshdb_connections_total counter
+meshdb_connections_total %d
+# HELP meshdb_commands_total Commands processed.
+# TYPE meshdb_commands_total counter
+meshdb_commands_total %d
+# HELP meshdb_command_errors_total Invalid or failed commands.
+# TYPE meshdb_command_errors_total counter
+meshdb_command_errors_total %d
+# HELP meshdb_quorum_failures_total Operations that did not reach quorum.
+# TYPE meshdb_quorum_failures_total counter
+meshdb_quorum_failures_total %d
+`, ready, s.stats.activeConnections.Load(), s.stats.totalConnections.Load(),
+		s.stats.commands.Load(), s.stats.commandErrors.Load(), s.stats.quorumFailures.Load())
+}
+
+func newOperationsServer(address string, server *Server) *http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("ok\n"))
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if !server.stats.ready.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("not ready\n"))
+			return
+		}
+		_, _ = w.Write([]byte("ready\n"))
+	})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte(server.metrics()))
+	})
+	return &http.Server{
+		Addr:              address,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       30 * time.Second,
 	}
 }
 
@@ -335,7 +422,15 @@ func main() {
 	replicationFactor := flag.Int("replication-factor", 3, "number of owners for each key")
 	readQuorum := flag.Int("read-quorum", 0, "successful replica reads required (default majority)")
 	writeQuorum := flag.Int("write-quorum", 0, "successful replica writes required (default majority)")
+	maxConnections := flag.Int("max-connections", 1024, "maximum simultaneous client connections")
+	readTimeout := flag.Duration("read-timeout", 30*time.Second, "maximum idle time waiting for a command")
+	writeTimeout := flag.Duration("write-timeout", 10*time.Second, "maximum time writing a response")
+	shutdownTimeout := flag.Duration("shutdown-timeout", 15*time.Second, "graceful shutdown deadline")
+	operationsAddress := flag.String("operations-address", "", "health and metrics HTTP address (for example 127.0.0.1:9090)")
 	flag.Parse()
+	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 {
+		log.Fatal("connection limit and timeouts must be positive")
+	}
 
 	var peers []string
 	for _, peer := range strings.Split(*peersFlag, ",") {
@@ -396,25 +491,80 @@ func main() {
 		writeQuorum:       *writeQuorum,
 		nodeID:            *advertise,
 		clock:             store.MaxVersion(),
+		readTimeout:       *readTimeout,
+		writeTimeout:      *writeTimeout,
 	}
 
 	listener, err := net.Listen("tcp", ":"+*port)
 	if err != nil {
 		log.Fatal("failed to start MeshDB:", err)
 	}
-	defer listener.Close()
-
 	log.Printf("MeshDB node %s listening on port %s", server.nodeID, *port)
 	log.Printf("Configured peers: %v", peers)
 	log.Printf("Replication N=%d R=%d W=%d", effectiveReplication, *readQuorum, *writeQuorum)
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+
+	var operations *http.Server
+	if *operationsAddress != "" {
+		operations = newOperationsServer(*operationsAddress, server)
+		go func() {
+			log.Printf("Operations endpoint listening on %s", *operationsAddress)
+			if err := operations.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("operations endpoint failed: %v", err)
+				stop()
+			}
+		}()
+	}
+
+	server.stats.ready.Store(true)
+	semaphore := make(chan struct{}, *maxConnections)
+	var connections sync.WaitGroup
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
 			log.Println("failed to accept connection:", err)
 			continue
 		}
+		select {
+		case semaphore <- struct{}{}:
+			connections.Add(1)
+			go func() {
+				defer connections.Done()
+				defer func() { <-semaphore }()
+				handleConnection(conn, server)
+			}()
+		default:
+			_, _ = fmt.Fprintln(conn, "ERR server_busy")
+			_ = conn.Close()
+		}
+	}
 
-		go handleConnection(conn, server)
+	server.stats.ready.Store(false)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), *shutdownTimeout)
+	defer cancel()
+	if operations != nil {
+		if err := operations.Shutdown(shutdownCtx); err != nil {
+			log.Printf("operations shutdown: %v", err)
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		connections.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		log.Print("MeshDB shutdown complete")
+	case <-shutdownCtx.Done():
+		log.Print("MeshDB shutdown deadline reached")
 	}
 }

@@ -38,4 +38,14 @@ configurations where R + W does not intersect.
 Use `-compact-on-startup` during a controlled restart to rewrite an oversized
 WAL with only the latest value for each key.
 
+Enable operational endpoints with `-operations-address 127.0.0.1:9090`:
+
+- `/healthz` reports that the process is alive.
+- `/readyz` reports whether the node is accepting database traffic.
+- `/metrics` exports Prometheus-compatible counters and gauges.
+
+Client concurrency and slow connections are bounded by `-max-connections`,
+`-read-timeout`, and `-write-timeout`. SIGINT/SIGTERM stops admission and lets
+in-flight connections drain up to `-shutdown-timeout`.
+
 Follow the build history in [`prompts/`](prompts/README.md).

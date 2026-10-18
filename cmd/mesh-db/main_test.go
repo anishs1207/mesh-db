@@ -2,6 +2,8 @@ package main
 
 import (
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -138,5 +140,26 @@ func TestQuorumReadSelectsNewestAndRepairs(t *testing.T) {
 		if !ok || got != winner {
 			t.Fatalf("%s replica not repaired: %#v ok=%v", name, got, ok)
 		}
+	}
+}
+
+func TestOperationsEndpoints(t *testing.T) {
+	server := newTestServer(t)
+	operations := newOperationsServer("127.0.0.1:0", server)
+
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	response := httptest.NewRecorder()
+	operations.Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("not-ready status = %d", response.Code)
+	}
+
+	server.stats.ready.Store(true)
+	_ = server.handleCommand("PING")
+	response = httptest.NewRecorder()
+	operations.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "meshdb_commands_total 1") ||
+		!strings.Contains(response.Body.String(), "meshdb_ready 1") {
+		t.Fatalf("unexpected metrics response: status=%d body=%q", response.Code, response.Body.String())
 	}
 }
