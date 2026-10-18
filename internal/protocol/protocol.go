@@ -21,6 +21,8 @@ const (
 	Set
 	ReplicaSet
 	ReplicaGet
+	Delete
+	ReplicaDelete
 )
 
 type Request struct {
@@ -52,6 +54,15 @@ func Parse(line string) (Request, error) {
 			return Request{}, fmt.Errorf("usage: GET <key>: key contains whitespace")
 		}
 		return Request{Command: Get, Key: key}, nil
+	case "DELETE":
+		key := strings.TrimSpace(rest)
+		if err := validateKey(key); err != nil {
+			return Request{}, fmt.Errorf("usage: DELETE <key>: %w", err)
+		}
+		if strings.ContainsAny(key, " \t\r\n") {
+			return Request{}, fmt.Errorf("usage: DELETE <key>: key contains whitespace")
+		}
+		return Request{Command: Delete, Key: key}, nil
 	case "SET":
 		key, value, ok := cutField(rest)
 		if !ok {
@@ -92,6 +103,22 @@ func Parse(line string) (Request, error) {
 			return Request{}, fmt.Errorf("usage: REPLICA_GET <key>: key contains whitespace")
 		}
 		return Request{Command: ReplicaGet, Key: key}, nil
+	case "REPLICA_DELETE":
+		fields := strings.Fields(rest)
+		if len(fields) != 3 {
+			return Request{}, fmt.Errorf("usage: REPLICA_DELETE <key> <version> <origin>")
+		}
+		version, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return Request{}, fmt.Errorf("invalid version")
+		}
+		if err := validateKey(fields[0]); err != nil {
+			return Request{}, err
+		}
+		if fields[2] == "" || strings.ContainsAny(fields[2], " \t\r\n") {
+			return Request{}, fmt.Errorf("invalid origin")
+		}
+		return Request{Command: ReplicaDelete, Key: fields[0], Version: version, Origin: fields[2]}, nil
 	default:
 		return Request{}, fmt.Errorf("unknown command")
 	}

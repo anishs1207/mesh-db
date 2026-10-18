@@ -107,13 +107,12 @@ func replicate(peer, key string, record storage.Value, secret []byte) error {
 	}
 
 	writer := bufio.NewWriter(conn)
-	command := fmt.Sprintf(
-		"REPLICA_SET %s %d %s %s",
-		key,
-		record.Version,
-		record.Origin,
-		record.Value,
-	)
+	var command string
+	if record.Tombstone {
+		command = fmt.Sprintf("REPLICA_DELETE %s %d %s", key, record.Version, record.Origin)
+	} else {
+		command = fmt.Sprintf("REPLICA_SET %s %d %s %s", key, record.Version, record.Origin, record.Value)
+	}
 	command = authenticatedCommand(command, secret) + "\n"
 
 	if _, err := writer.WriteString(command); err != nil {
@@ -185,7 +184,7 @@ func fetchReplica(peer, key string, secret []byte) (storage.Value, bool, error) 
 		return storage.Value{}, false, nil
 	}
 	parts := strings.Split(line, " ")
-	if len(parts) != 4 || parts[0] != "VALUE" {
+	if len(parts) != 5 || parts[0] != "VALUE" {
 		return storage.Value{}, false, fmt.Errorf("invalid replica response %q", line)
 	}
 	version, err := strconv.ParseUint(parts[1], 10, 64)
@@ -196,11 +195,18 @@ func fetchReplica(peer, key string, secret []byte) (storage.Value, bool, error) 
 	if err != nil {
 		return storage.Value{}, false, fmt.Errorf("invalid replica origin: %w", err)
 	}
-	value, err := base64.RawStdEncoding.DecodeString(parts[3])
-	if err != nil {
-		return storage.Value{}, false, fmt.Errorf("invalid replica value: %w", err)
+	tombstone := parts[3] == "1"
+	if parts[3] != "0" && !tombstone {
+		return storage.Value{}, false, fmt.Errorf("invalid replica tombstone %q", parts[3])
 	}
-	return storage.Value{Version: version, Origin: string(origin), Value: string(value)}, true, nil
+	var value []byte
+	if parts[4] != "-" {
+		value, err = base64.RawStdEncoding.DecodeString(parts[4])
+		if err != nil {
+			return storage.Value{}, false, fmt.Errorf("invalid replica value: %w", err)
+		}
+	}
+	return storage.Value{Version: version, Origin: string(origin), Value: string(value), Tombstone: tombstone}, true, nil
 }
 
 func (s *Server) getReplica(owner, key string) (storage.Value, bool, error) {
@@ -311,6 +317,16 @@ func (s *Server) handleCommand(line string) string {
 		}
 		return fmt.Sprintf("OK version=%d acknowledgements=%d", record.Version, acks)
 
+	case protocol.Delete:
+		record := storage.Value{Version: s.nextVersion(), Origin: s.nodeID, Tombstone: true}
+		acks, failed := s.quorumWrite(request.Key, record)
+		if acks < s.writeQuorum {
+			s.stats.quorumFailures.Add(1)
+			return fmt.Sprintf("ERR write_quorum_unavailable acknowledgements=%d required=%d failed=%s",
+				acks, s.writeQuorum, strings.Join(failed, ","))
+		}
+		return fmt.Sprintf("OK version=%d acknowledgements=%d", record.Version, acks)
+
 	case protocol.ReplicaSet:
 		if !authorizedInternal {
 			s.stats.commandErrors.Add(1)
@@ -330,6 +346,18 @@ func (s *Server) handleCommand(line string) string {
 		// A replica does not forward the write again.
 		return "OK"
 
+	case protocol.ReplicaDelete:
+		if !authorizedInternal {
+			s.stats.commandErrors.Add(1)
+			return "ERR unauthorized"
+		}
+		record := storage.Value{Version: request.Version, Origin: request.Origin, Tombstone: true}
+		s.observeVersion(request.Version)
+		if _, err := s.store.Set(request.Key, record); err != nil {
+			return "ERR persistence failure"
+		}
+		return "OK"
+
 	case protocol.ReplicaGet:
 		if !authorizedInternal {
 			s.stats.commandErrors.Add(1)
@@ -339,9 +367,17 @@ func (s *Server) handleCommand(line string) string {
 		if !ok {
 			return "NOT_FOUND"
 		}
-		return fmt.Sprintf("VALUE %d %s %s", record.Version,
+		encodedValue := base64.RawStdEncoding.EncodeToString([]byte(record.Value))
+		if encodedValue == "" {
+			encodedValue = "-"
+		}
+		tombstone := 0
+		if record.Tombstone {
+			tombstone = 1
+		}
+		return fmt.Sprintf("VALUE %d %s %d %s", record.Version,
 			base64.RawStdEncoding.EncodeToString([]byte(record.Origin)),
-			base64.RawStdEncoding.EncodeToString([]byte(record.Value)))
+			tombstone, encodedValue)
 
 	case protocol.Get:
 		record, ok, responses, err := s.quorumRead(request.Key)
@@ -349,7 +385,7 @@ func (s *Server) handleCommand(line string) string {
 			s.stats.quorumFailures.Add(1)
 			return fmt.Sprintf("ERR read_quorum_unavailable responses=%d required=%d", responses, s.readQuorum)
 		}
-		if !ok {
+		if !ok || record.Tombstone {
 			return "NOT_FOUND"
 		}
 

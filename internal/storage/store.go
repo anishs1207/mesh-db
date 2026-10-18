@@ -22,9 +22,10 @@ const (
 
 // Value is a versioned database value. Version and Origin form a total order.
 type Value struct {
-	Value   string `json:"value"`
-	Version uint64 `json:"version"`
-	Origin  string `json:"origin"`
+	Value     string `json:"value,omitempty"`
+	Version   uint64 `json:"version"`
+	Origin    string `json:"origin"`
+	Tombstone bool   `json:"tombstone,omitempty"`
 }
 
 type walRecord struct {

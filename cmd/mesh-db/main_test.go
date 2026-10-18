@@ -85,6 +85,12 @@ func TestCommandLifecycle(t *testing.T) {
 	if got := server.handleCommand("GET greeting"); got != "hello distributed world (version=1 origin=test-node)" {
 		t.Fatalf("GET = %q", got)
 	}
+	if got := server.handleCommand("DELETE greeting"); got != "OK version=2 acknowledgements=1" {
+		t.Fatalf("DELETE = %q", got)
+	}
+	if got := server.handleCommand("GET greeting"); got != "NOT_FOUND" {
+		t.Fatalf("GET deleted key = %q", got)
+	}
 }
 
 func TestReplicaAdvancesLogicalClock(t *testing.T) {
@@ -157,6 +163,29 @@ func TestQuorumReadSelectsNewestAndRepairs(t *testing.T) {
 		got, ok := replica.store.Get("account")
 		if !ok || got != winner {
 			t.Fatalf("%s replica not repaired: %#v ok=%v", name, got, ok)
+		}
+	}
+}
+
+func TestQuorumReadDoesNotResurrectDeletedValue(t *testing.T) {
+	firstAddress, first := startTestReplica(t)
+	secondAddress, second := startTestReplica(t)
+	thirdAddress, third := startTestReplica(t)
+	first.ring = cluster.NewRing([]string{firstAddress, secondAddress, thirdAddress}, 64)
+	first.replicationFactor = 3
+	first.readQuorum = 2
+
+	_, _ = first.store.Set("deleted", storage.Value{Value: "stale", Version: 4, Origin: "node-a"})
+	_, _ = second.store.Set("deleted", storage.Value{Version: 5, Origin: "node-b", Tombstone: true})
+	_, _ = third.store.Set("deleted", storage.Value{Value: "older", Version: 3, Origin: "node-c"})
+
+	if got := first.handleCommand("GET deleted"); got != "NOT_FOUND" {
+		t.Fatalf("deleted GET = %q", got)
+	}
+	for name, replica := range map[string]*Server{"first": first, "second": second, "third": third} {
+		got, ok := replica.store.Get("deleted")
+		if !ok || !got.Tombstone || got.Version != 5 {
+			t.Fatalf("%s tombstone not repaired: %#v ok=%v", name, got, ok)
 		}
 	}
 }

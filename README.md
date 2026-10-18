@@ -14,6 +14,7 @@ production data until the production-readiness checklist in
 PING
 SET <key> <value>
 GET <key>
+DELETE <key>
 ```
 
 Start one node with durable local data:
