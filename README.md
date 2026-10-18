@@ -91,6 +91,8 @@ replica that missed writes can converge without waiting for a client read. Use
 Failed replica deliveries are persisted under the node data directory and
 retried every five seconds. Tune this with `-hint-interval`; hints survive a
 coordinator restart and are removed only after the target acknowledges them.
+New hint files are format-fenced and content-addressed, so on-disk payload
+tampering is rejected before it can become an authenticated replica mutation.
 Pending hints are capped at 1 GiB by default with `-hint-max-bytes`; current and
 maximum usage are exported as metrics. Capacity exhaustion is logged and
 anti-entropy remains the fallback repair mechanism.

@@ -2,11 +2,13 @@
 package hints
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,11 +19,14 @@ import (
 	"github.com/anishs1207/mesh-db/internal/storage"
 )
 
+const hintFormat = 1
+
 type Hint struct {
-	ID    string        `json:"id"`
-	Owner string        `json:"owner"`
-	Key   string        `json:"key"`
-	Value storage.Value `json:"value"`
+	Format uint8         `json:"format,omitempty"`
+	ID     string        `json:"id"`
+	Owner  string        `json:"owner"`
+	Key    string        `json:"key"`
+	Value  storage.Value `json:"value"`
 }
 
 type Store struct {
@@ -64,13 +69,12 @@ func (s *Store) Usage() (used, maximum int64) {
 func (s *Store) Put(owner, key string, value storage.Value) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s", owner, key, value.Version, value.Origin)))
-	id := hex.EncodeToString(sum[:])
+	id := contentID(owner, key, value)
 	target := filepath.Join(s.dir, id+".json")
 	if _, err := os.Stat(target); err == nil {
 		return nil
 	}
-	hint := Hint{ID: id, Owner: owner, Key: key, Value: value}
+	hint := Hint{Format: hintFormat, ID: id, Owner: owner, Key: key, Value: value}
 	data, err := json.Marshal(hint)
 	if err != nil {
 		return fmt.Errorf("encode hint: %w", err)
@@ -135,8 +139,8 @@ func (s *Store) ListLimit(limit int) ([]Hint, error) {
 		if err != nil {
 			return nil, err
 		}
-		var hint Hint
-		if err := json.Unmarshal(data, &hint); err != nil {
+		hint, err := decodeHint(data)
+		if err != nil {
 			decodeErrors = append(decodeErrors, fmt.Errorf("decode hint %s: %w", entry.Name(), err))
 			continue
 		}
@@ -145,10 +149,53 @@ func (s *Store) ListLimit(limit int) ([]Hint, error) {
 			decodeErrors = append(decodeErrors, fmt.Errorf("hint %s has mismatched or invalid id", entry.Name()))
 			continue
 		}
+		expectedID := contentID(hint.Owner, hint.Key, hint.Value)
+		if hint.Format == 0 {
+			expectedID = legacyID(hint.Owner, hint.Key, hint.Value)
+		}
+		if hint.ID != expectedID {
+			decodeErrors = append(decodeErrors, fmt.Errorf("hint %s failed content identity validation", entry.Name()))
+			continue
+		}
 		result = append(result, hint)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, errors.Join(decodeErrors...)
+}
+
+func decodeHint(data []byte) (Hint, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var hint Hint
+	if err := decoder.Decode(&hint); err != nil {
+		return Hint{}, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return Hint{}, fmt.Errorf("multiple JSON values")
+		}
+		return Hint{}, fmt.Errorf("trailing data: %w", err)
+	}
+	if hint.Format != 0 && hint.Format != hintFormat {
+		return Hint{}, fmt.Errorf("unsupported hint format %d", hint.Format)
+	}
+	return hint, nil
+}
+
+func contentID(owner, key string, value storage.Value) string {
+	payload, _ := json.Marshal(struct {
+		Owner string        `json:"owner"`
+		Key   string        `json:"key"`
+		Value storage.Value `json:"value"`
+	}{Owner: owner, Key: key, Value: value})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func legacyID(owner, key string, value storage.Value) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d\x00%s", owner, key, value.Version, value.Origin)))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Store) Delete(id string) error {

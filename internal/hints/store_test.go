@@ -1,6 +1,7 @@
 package hints
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -63,6 +64,56 @@ func TestCorruptHintDoesNotBlockHealthyDelivery(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Value != value {
 		t.Fatalf("healthy hints were lost: %#v", items)
+	}
+}
+
+func TestHintContentTamperingIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put("owner", "key", storage.Value{Value: "original", Version: 3, Origin: "node"}); err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.List()
+	if err != nil || len(items) != 1 {
+		t.Fatalf("initial hints = %#v, err=%v", items, err)
+	}
+	path := filepath.Join(dir, items[0].ID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = []byte(strings.Replace(string(data), "original", "tampered", 1))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err = store.List()
+	if err == nil || len(items) != 0 {
+		t.Fatalf("tampered hint accepted: %#v, err=%v", items, err)
+	}
+}
+
+func TestLegacyHintIdentityRemainsReadable(t *testing.T) {
+	dir := t.TempDir()
+	value := storage.Value{Value: "legacy", Version: 4, Origin: "old-node"}
+	id := legacyID("owner", "key", value)
+	data, err := json.Marshal(Hint{ID: id, Owner: "owner", Key: "key", Value: value})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.List()
+	if err != nil || len(items) != 1 || items[0].Value != value {
+		t.Fatalf("legacy hint = %#v, err=%v", items, err)
 	}
 }
 
