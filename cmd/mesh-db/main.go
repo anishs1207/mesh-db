@@ -643,6 +643,7 @@ func main() {
 	)
 	dataDir := flag.String("data-dir", "./data", "directory for durable node data")
 	compactOnStartup := flag.Bool("compact-on-startup", false, "rewrite the WAL with only current values before serving")
+	backupOnStartup := flag.String("backup-on-startup", "", "write a compact backup WAL to this new path before serving")
 	advertise := flag.String("advertise", "", "address advertised to peers (default 127.0.0.1:<port>)")
 	replicationFactor := flag.Int("replication-factor", 3, "number of owners for each key")
 	readQuorum := flag.Int("read-quorum", 0, "successful replica reads required (default majority)")
@@ -734,6 +735,13 @@ func main() {
 			_ = store.Close()
 			log.Fatal("failed to compact storage: ", err)
 		}
+	}
+	if *backupOnStartup != "" {
+		if err := store.Backup(*backupOnStartup); err != nil {
+			_ = store.Close()
+			log.Fatal("failed to create backup: ", err)
+		}
+		log.Printf("Backup written to %s", *backupOnStartup)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {

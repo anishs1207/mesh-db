@@ -49,6 +49,11 @@ configurations where R + W does not intersect.
 Use `-compact-on-startup` during a controlled restart to rewrite an oversized
 WAL with only the latest value for each key.
 
+Use `-backup-on-startup /secure/path/backup.wal` during a controlled restart to
+create a compact, checksummed backup. The destination must be new. To restore,
+place the backup at `<new-data-dir>/meshdb.wal` before starting a node; always
+restore into an empty data directory and retain an off-host copy.
+
 Enable operational endpoints with `-operations-address 127.0.0.1:9090`:
 
 - `/healthz` reports that the process is alive.

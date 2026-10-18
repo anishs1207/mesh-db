@@ -155,3 +155,37 @@ func TestEntriesReturnsIndependentSnapshot(t *testing.T) {
 		t.Fatalf("snapshot mutated store: %#v", got)
 	}
 }
+
+func TestBackupRestoresValuesAndTombstones(t *testing.T) {
+	source := t.TempDir()
+	store, err := Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = store.Set("live", Value{Value: "data", Version: 3, Origin: "n"})
+	_, _ = store.Set("gone", Value{Version: 4, Origin: "n", Tombstone: true})
+	backup := filepath.Join(t.TempDir(), "backup.wal")
+	if err := store.Backup(backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Backup(backup); err == nil {
+		t.Fatal("expected overwrite protection")
+	}
+	_ = store.Close()
+
+	restoreDir := t.TempDir()
+	if err := os.Rename(backup, filepath.Join(restoreDir, walName)); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Open(restoreDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if got, ok := restored.Get("live"); !ok || got.Value != "data" {
+		t.Fatalf("live = %#v %v", got, ok)
+	}
+	if got, ok := restored.Get("gone"); !ok || !got.Tombstone {
+		t.Fatalf("gone = %#v %v", got, ok)
+	}
+}

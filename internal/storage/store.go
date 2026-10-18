@@ -278,6 +278,51 @@ func (s *Store) Entries() map[string]Value {
 	return entries
 }
 
+// Backup writes a consistent, compact, checksummed WAL image. The destination
+// must not already exist, preventing accidental backup overwrite.
+func (s *Store) Backup(destination string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, err := os.Stat(destination); err == nil {
+		return fmt.Errorf("backup destination already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect backup destination: %w", err)
+	}
+	dir := filepath.Dir(destination)
+	temp, err := os.CreateTemp(dir, ".meshdb-backup-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create backup: %w", err)
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	keys := make([]string, 0, len(s.data))
+	for key := range s.data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := appendRecord(temp, key, s.data[key]); err != nil {
+			_ = temp.Close()
+			return err
+		}
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return fmt.Errorf("sync backup: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempPath, destination); err != nil {
+		return fmt.Errorf("install backup: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) MaxVersion() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
