@@ -80,6 +80,11 @@ records as retained keys. Tune this with `-compaction-interval`,
 `-compaction-min-bytes`, and `-compaction-stale-ratio`; set the interval to zero
 to keep compaction under external operational control.
 
+The active WAL is capped at 10 GiB by default with `-wal-max-bytes`. Mutations
+that would cross the exact framed-byte limit fail before append, while
+compaction remains available to reclaim obsolete records. Current usage, the
+limit, and capacity rejections are exported as metrics.
+
 Use `-backup-on-startup /secure/path/backup.wal` during a controlled restart to
 create a compact, checksummed backup. The destination must be new. To restore,
 place the backup at `<new-data-dir>/meshdb.wal` before starting a node; always

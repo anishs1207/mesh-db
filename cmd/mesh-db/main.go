@@ -881,9 +881,16 @@ func (s *Server) storageMetrics() string {
 	if err != nil {
 		walBytes = -1
 	}
+	walMaxBytes, walRejections := s.store.WALCapacityStats()
 	return fmt.Sprintf(`# HELP meshdb_wal_bytes Current write-ahead log size in bytes.
 # TYPE meshdb_wal_bytes gauge
 meshdb_wal_bytes %d
+# HELP meshdb_wal_max_bytes Configured write-ahead log hard limit in bytes.
+# TYPE meshdb_wal_max_bytes gauge
+meshdb_wal_max_bytes %d
+# HELP meshdb_wal_capacity_rejections_total Mutations rejected before append because the WAL was at capacity.
+# TYPE meshdb_wal_capacity_rejections_total counter
+meshdb_wal_capacity_rejections_total %d
 # HELP meshdb_wal_records Records currently stored in the write-ahead log.
 # TYPE meshdb_wal_records gauge
 meshdb_wal_records %d
@@ -895,7 +902,7 @@ meshdb_live_keys %d
 meshdb_compactions_total %d
 # HELP meshdb_compaction_failures_total Failed online WAL compactions.
 # TYPE meshdb_compaction_failures_total counter
-meshdb_compaction_failures_total %d`, walBytes, walRecords, liveKeys,
+meshdb_compaction_failures_total %d`, walBytes, walMaxBytes, walRejections, walRecords, liveKeys,
 		s.stats.compactions.Load(), s.stats.compactionFailures.Load())
 }
 
@@ -951,6 +958,7 @@ func main() {
 	repairInterval := flag.Duration("repair-interval", 30*time.Second, "interval between anti-entropy scans (0 disables)")
 	hintInterval := flag.Duration("hint-interval", 5*time.Second, "interval between hinted-handoff retries (0 disables)")
 	hintMaxBytes := flag.Int64("hint-max-bytes", 1<<30, "maximum disk bytes for pending hinted handoff")
+	walMaxBytes := flag.Int64("wal-max-bytes", 10<<30, "maximum bytes allowed in the active write-ahead log")
 	hintBatchSize := flag.Int("hint-batch-size", 256, "maximum hinted handoff records attempted per retry pass")
 	compactionInterval := flag.Duration("compaction-interval", 5*time.Minute, "interval for checking WAL compaction eligibility (0 disables)")
 	compactionMinBytes := flag.Int64("compaction-min-bytes", 256<<20, "minimum WAL size before automatic compaction")
@@ -959,7 +967,7 @@ func main() {
 	tlsKeyFile := flag.String("tls-key", "", "PEM private key for mutually authenticated TLS")
 	tlsCAFile := flag.String("tls-ca", "", "PEM CA used to verify clients and peers")
 	flag.Parse()
-	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 || *hintBatchSize <= 0 || *compactionInterval < 0 || *compactionMinBytes <= 0 || *compactionStaleRatio < 1 {
+	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 || *walMaxBytes <= 0 || *hintBatchSize <= 0 || *compactionInterval < 0 || *compactionMinBytes <= 0 || *compactionStaleRatio < 1 {
 		log.Fatal("connection limit and timeouts must be positive")
 	}
 
@@ -1025,6 +1033,7 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to open storage: ", err)
 	}
+	store.SetMaxWALBytes(*walMaxBytes)
 	hints, err := hintstore.Open(filepath.Join(*dataDir, "hints"))
 	if err != nil {
 		_ = store.Close()

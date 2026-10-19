@@ -108,6 +108,47 @@ func TestOversizedWriteCannotCreateUnreadableWAL(t *testing.T) {
 	}
 }
 
+func TestWALCapacityRejectsBeforeAppend(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := Value{Value: "first", Version: 1, Origin: "node"}
+	second := Value{Value: "second", Version: 2, Origin: "node"}
+	firstPayload, _ := encodeRecord("first", first)
+	secondPayload, _ := encodeRecord("second", second)
+	limit := int64(2*headerSize + len(firstPayload) + len(secondPayload) - 1)
+	store.SetMaxWALBytes(limit)
+	if applied, err := store.Set("first", first); err != nil || !applied {
+		t.Fatalf("first Set: applied=%v err=%v", applied, err)
+	}
+	if applied, err := store.Set("second", second); !errors.Is(err, ErrWALCapacity) || applied {
+		t.Fatalf("capacity Set: applied=%v err=%v", applied, err)
+	}
+	maximum, rejections := store.WALCapacityStats()
+	if maximum != limit || rejections != 1 {
+		t.Fatalf("capacity stats: maximum=%d rejections=%d", maximum, rejections)
+	}
+	if _, ok := store.Get("second"); ok {
+		t.Fatal("capacity-rejected value was published")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(dir)
+	if err != nil {
+		t.Fatalf("reopen after capacity rejection: %v", err)
+	}
+	defer store.Close()
+	if got, ok := store.Get("first"); !ok || got != first {
+		t.Fatalf("recovered first value = %#v, found=%v", got, ok)
+	}
+	if _, ok := store.Get("second"); ok {
+		t.Fatal("capacity-rejected value recovered")
+	}
+}
+
 func TestRecoveryAcceptsLegacyRecordWithoutFormatMarker(t *testing.T) {
 	dir := t.TempDir()
 	payload, err := json.Marshal(struct {

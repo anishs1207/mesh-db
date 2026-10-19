@@ -24,6 +24,8 @@ const (
 	walFormat     = 1
 )
 
+var ErrWALCapacity = errors.New("WAL capacity exceeded")
+
 // Value is a versioned database value. Version and Origin form a total order.
 type Value struct {
 	Value     string `json:"value,omitempty"`
@@ -46,6 +48,8 @@ type Store struct {
 	walPath    string
 	maxVersion uint64
 	records    uint64
+	maxBytes   int64
+	rejections uint64
 	closed     bool
 }
 
@@ -185,11 +189,20 @@ func (s *Store) Set(key string, value Value) (bool, error) {
 	if current, ok := s.data[key]; ok && !newer(value, current) {
 		return false, nil
 	}
+	payload, err := encodeRecord(key, value)
+	if err != nil {
+		return false, err
+	}
 	offset, err := s.wal.Seek(0, io.SeekEnd)
 	if err != nil {
 		return false, fmt.Errorf("locate WAL append boundary: %w", err)
 	}
-	if err := appendRecord(s.wal, key, value); err != nil {
+	recordBytes := int64(headerSize + len(payload))
+	if s.maxBytes > 0 && (offset > s.maxBytes || recordBytes > s.maxBytes-offset) {
+		s.rejections++
+		return false, fmt.Errorf("%w: current=%d record=%d limit=%d", ErrWALCapacity, offset, recordBytes, s.maxBytes)
+	}
+	if err := appendPayload(s.wal, payload); err != nil {
 		return false, s.rollbackAppend(offset, err)
 	}
 	if err := s.wal.Sync(); err != nil {
@@ -214,13 +227,25 @@ func (s *Store) rollbackAppend(offset int64, cause error) error {
 }
 
 func appendRecord(w io.Writer, key string, value Value) error {
+	payload, err := encodeRecord(key, value)
+	if err != nil {
+		return err
+	}
+	return appendPayload(w, payload)
+}
+
+func encodeRecord(key string, value Value) ([]byte, error) {
 	payload, err := json.Marshal(walRecord{Format: walFormat, Key: key, Value: value})
 	if err != nil {
-		return fmt.Errorf("encode WAL record: %w", err)
+		return nil, fmt.Errorf("encode WAL record: %w", err)
 	}
 	if len(payload) == 0 || len(payload) > maxRecordSize {
-		return fmt.Errorf("WAL record size %d exceeds limit %d", len(payload), maxRecordSize)
+		return nil, fmt.Errorf("WAL record size %d exceeds limit %d", len(payload), maxRecordSize)
 	}
+	return payload, nil
+}
+
+func appendPayload(w io.Writer, payload []byte) error {
 	header := make([]byte, headerSize)
 	binary.BigEndian.PutUint32(header[:4], uint32(len(payload)))
 	binary.BigEndian.PutUint32(header[4:], crc32.ChecksumIEEE(payload))
@@ -231,6 +256,12 @@ func appendRecord(w io.Writer, key string, value Value) error {
 		return fmt.Errorf("write WAL record: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) SetMaxWALBytes(maxBytes int64) {
+	s.mu.Lock()
+	s.maxBytes = maxBytes
+	s.mu.Unlock()
 }
 
 // Compact rewrites the WAL with only the newest value for every key. The old
@@ -436,6 +467,14 @@ func (s *Store) WALStats() (bytes int64, records uint64, liveKeys int, err error
 		return 0, 0, 0, fmt.Errorf("stat WAL: %w", err)
 	}
 	return info.Size(), s.records, len(s.data), nil
+}
+
+// WALCapacityStats reports the configured hard limit and the number of writes
+// rejected before append because they would exceed it.
+func (s *Store) WALCapacityStats() (maximum int64, rejections uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxBytes, s.rejections
 }
 
 // NeedsCompaction reports whether both the size floor and stale-record ratio
