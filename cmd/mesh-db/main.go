@@ -42,7 +42,10 @@ const (
 	internalNonceBytes      = 16
 )
 
-var errReplicaSuperseded = errors.New("replica already stores a newer value")
+var (
+	errReplicaSuperseded = errors.New("replica already stores a newer value")
+	errVersionExhausted  = errors.New("logical version space exhausted")
+)
 
 // Server represents one MeshDB node.
 type Server struct {
@@ -117,12 +120,15 @@ type serverStats struct {
 }
 
 // nextVersion generates a monotonically increasing local version.
-func (s *Server) nextVersion() uint64 {
+func (s *Server) nextVersion() (uint64, error) {
 	s.clockMu.Lock()
 	defer s.clockMu.Unlock()
 
+	if s.clock == ^uint64(0) {
+		return 0, errVersionExhausted
+	}
 	s.clock++
-	return s.clock
+	return s.clock, nil
 }
 
 // observeVersion advances our clock when we receive a replicated write.
@@ -658,9 +664,14 @@ func (s *Server) handleCommand(line string) string {
 			return fmt.Sprintf("ERR read_quorum_unavailable responses=%d required=%d", responses, s.readQuorum)
 		}
 		s.observeVersion(observed.Version)
+		version, err := s.nextVersion()
+		if err != nil {
+			s.stats.commandErrors.Add(1)
+			return "ERR version_space_exhausted"
+		}
 		record := storage.Value{
 			Value:   request.Value,
-			Version: s.nextVersion(),
+			Version: version,
 			Origin:  s.nodeID,
 		}
 
@@ -679,7 +690,12 @@ func (s *Server) handleCommand(line string) string {
 			return fmt.Sprintf("ERR read_quorum_unavailable responses=%d required=%d", responses, s.readQuorum)
 		}
 		s.observeVersion(observed.Version)
-		record := storage.Value{Version: s.nextVersion(), Origin: s.nodeID, Tombstone: true}
+		version, err := s.nextVersion()
+		if err != nil {
+			s.stats.commandErrors.Add(1)
+			return "ERR version_space_exhausted"
+		}
+		record := storage.Value{Version: version, Origin: s.nodeID, Tombstone: true}
 		acks, failed := s.quorumWrite(request.Key, record)
 		if acks < s.writeQuorum {
 			s.stats.quorumFailures.Add(1)

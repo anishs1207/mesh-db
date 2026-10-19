@@ -125,6 +125,20 @@ func TestCommandLifecycle(t *testing.T) {
 	}
 }
 
+func TestLogicalClockExhaustionFailsClosed(t *testing.T) {
+	server := newTestServer(t)
+	server.clock = ^uint64(0)
+	if got := server.handleCommand("SET key value"); got != "ERR version_space_exhausted" {
+		t.Fatalf("SET at version exhaustion = %q", got)
+	}
+	if _, ok := server.store.Get("key"); ok {
+		t.Fatal("version-exhausted write mutated storage")
+	}
+	if got := server.handleCommand("DELETE key"); got != "ERR version_space_exhausted" {
+		t.Fatalf("DELETE at version exhaustion = %q", got)
+	}
+}
+
 func TestReplicaAdvancesLogicalClock(t *testing.T) {
 	server := newTestServer(t)
 	command := "REPLICA_SET " + testTopology + " remote 9 peer-a replicated value"

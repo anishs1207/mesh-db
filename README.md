@@ -71,6 +71,9 @@ Writes return after the configured quorum acknowledges them; late failures are
 captured by hinted handoff. Reads return immediately when a quorum agrees, but
 wait for reconciliation when replicas disagree so newer values and tombstones
 are not hidden by the fast path.
+Logical versions are overflow-fenced: if the 64-bit Lamport space is exhausted,
+new client mutations fail with `ERR version_space_exhausted` instead of wrapping
+to zero and being silently treated as stale.
 
 Use `-compact-on-startup` during a controlled restart to rewrite an oversized
 WAL with only the latest value for each key.
