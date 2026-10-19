@@ -23,6 +23,8 @@ jobs:
         run: go vet ./...
       - name: Test with race detector
         run: go test -race -count=1 ./...
+      - name: Compile and smoke-run benchmarks
+        run: go test -run=^$ -bench=. -benchtime=1x ./internal/storage ./internal/cluster
       - name: Fuzz protocol boundary
         run: go test -run=^$ -fuzz=FuzzParse -fuzztime=10s ./internal/protocol
       - name: Fuzz WAL recovery

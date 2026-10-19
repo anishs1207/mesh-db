@@ -164,3 +164,17 @@ explicitly opts into plaintext on its isolated container network; add mounted
 certificates and the TLS flags before adapting it for production.
 
 Follow the build history in [`prompts/`](prompts/README.md).
+
+## Performance baselines
+
+Run the reproducible microbenchmarks with:
+
+```bash
+go test -run '^$' -bench '.' -benchmem ./internal/storage ./internal/cluster
+```
+
+They cover durable 1 KiB WAL writes, parallel point reads, bounded page
+selection over one million in-memory keys, and three-owner placement on a
+100-node ring. CI smoke-runs every benchmark once so benchmark code cannot rot.
+Results are machine and filesystem dependent; use repeated runs with `benchstat`
+on the target deployment hardware before making capacity claims.
