@@ -490,6 +490,31 @@ func TestBackupRestoresValuesAndTombstones(t *testing.T) {
 	}
 }
 
+func TestPublishNewFileNeverClobbersDestination(t *testing.T) {
+	dir := t.TempDir()
+	tempPath := filepath.Join(dir, "candidate.tmp")
+	destination := filepath.Join(dir, "backup.wal")
+	if err := os.WriteFile(tempPath, []byte("candidate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishNewFile(tempPath, destination); err == nil {
+		t.Fatal("published over an existing destination")
+	}
+	contents, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "existing" {
+		t.Fatalf("destination was changed to %q", contents)
+	}
+	if contents, err := os.ReadFile(tempPath); err != nil || string(contents) != "candidate" {
+		t.Fatalf("failed publication destroyed candidate: contents=%q err=%v", contents, err)
+	}
+}
+
 func TestCompactionEligibilityUsesSizeAndStaleRatio(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

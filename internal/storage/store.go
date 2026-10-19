@@ -567,11 +567,25 @@ func (s *Store) Backup(destination string) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tempPath, destination); err != nil {
+	if err := publishNewFile(tempPath, destination); err != nil {
 		return fmt.Errorf("install backup: %w", err)
 	}
+	return nil
+}
+
+func publishNewFile(tempPath, destination string) error {
+	if err := os.Link(tempPath, destination); err != nil {
+		return fmt.Errorf("publish without overwrite: %w", err)
+	}
+	dir := filepath.Dir(destination)
 	if err := fsutil.SyncDir(dir); err != nil {
-		return fmt.Errorf("persist backup directory entry: %w", err)
+		return fmt.Errorf("persist published file: %w", err)
+	}
+	if err := os.Remove(tempPath); err != nil {
+		return fmt.Errorf("remove published temporary link: %w", err)
+	}
+	if err := fsutil.SyncDir(dir); err != nil {
+		return fmt.Errorf("persist temporary-link removal: %w", err)
 	}
 	return nil
 }

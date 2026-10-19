@@ -126,6 +126,10 @@ Use `-backup-on-startup /secure/path/backup.wal` during a controlled restart to
 create a compact, checksummed backup. The destination must be new. To restore,
 place the backup at `<new-data-dir>/meshdb.wal` before starting a node; always
 restore into an empty data directory and retain an off-host copy.
+Backup publication uses an atomic no-clobber link rather than replacement
+rename semantics, so a destination created concurrently is never overwritten.
+The published entry and temporary-link cleanup are directory-synced where the
+platform exposes that durability primitive.
 
 Enable operational endpoints with `-operations-address 127.0.0.1:9090`:
 
