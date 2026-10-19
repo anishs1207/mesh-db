@@ -109,6 +109,11 @@ compacts only after the WAL reaches 256 MiB and contains at least twice as many
 records as retained keys. Tune this with `-compaction-interval`,
 `-compaction-min-bytes`, and `-compaction-stale-ratio`; set the interval to zero
 to keep compaction under external operational control.
+Before a compacted WAL can replace the active log, MeshDB reopens and strictly
+verifies the entire synced candidate, including framing, checksums, schema,
+semantic invariants, unique keys, and exact record count. Backup candidates pass
+the same read-after-write verification before publication; partial candidates
+are rejected rather than repaired in place.
 
 The active WAL is capped at 10 GiB by default with `-wal-max-bytes`. Mutations
 that would cross the exact framed-byte limit fail before append, while

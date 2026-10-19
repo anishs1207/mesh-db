@@ -395,6 +395,9 @@ func (s *Store) Compact() error {
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("close compacted WAL: %w", err)
 	}
+	if err := verifyWALImage(tempPath, len(s.data)); err != nil {
+		return fmt.Errorf("verify compacted WAL: %w", err)
+	}
 	if err := s.wal.Close(); err != nil {
 		return fmt.Errorf("close active WAL: %w", err)
 	}
@@ -571,8 +574,65 @@ func (s *Store) Backup(destination string) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
+	if err := verifyWALImage(tempPath, len(s.data)); err != nil {
+		return fmt.Errorf("verify backup: %w", err)
+	}
 	if err := publishNewFile(tempPath, destination); err != nil {
 		return fmt.Errorf("install backup: %w", err)
+	}
+	return nil
+}
+
+// verifyWALImage strictly validates a newly written compact image. Unlike live
+// recovery, a partial tail is never truncated: a candidate must be complete
+// before it can replace or publish durable state.
+func verifyWALImage(path string, expectedRecords int) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	reader := bufio.NewReader(file)
+	values := make(map[string]Value, expectedRecords)
+	records := 0
+	var offset int64
+	for {
+		header := make([]byte, headerSize)
+		_, err := io.ReadFull(reader, header)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read header at offset %d: %w", offset, err)
+		}
+		length := binary.BigEndian.Uint32(header[:4])
+		checksum := binary.BigEndian.Uint32(header[4:])
+		if length == 0 || length > maxRecordSize {
+			return fmt.Errorf("invalid record length %d at offset %d", length, offset)
+		}
+		payload := make([]byte, length)
+		if _, err := io.ReadFull(reader, payload); err != nil {
+			return fmt.Errorf("read record at offset %d: %w", offset, err)
+		}
+		if crc32.ChecksumIEEE(payload) != checksum {
+			return fmt.Errorf("checksum mismatch at offset %d", offset)
+		}
+		record, err := decodeRecord(payload)
+		if err != nil {
+			return fmt.Errorf("decode record at offset %d: %w", offset, err)
+		}
+		if current, ok := values[record.Key]; ok {
+			if VersionConflict(current, record.Value) {
+				return fmt.Errorf("version conflict at offset %d: %w", offset, ErrVersionConflict)
+			}
+			return fmt.Errorf("duplicate key %q in compact WAL", record.Key)
+		}
+		values[record.Key] = record.Value
+		records++
+		offset += int64(headerSize) + int64(length)
+	}
+	if records != expectedRecords || len(values) != expectedRecords {
+		return fmt.Errorf("record count %d, unique keys %d; expected %d", records, len(values), expectedRecords)
 	}
 	return nil
 }

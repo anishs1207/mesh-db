@@ -541,6 +541,70 @@ func TestPublishNewFileNeverClobbersDestination(t *testing.T) {
 	}
 }
 
+func TestStrictWALImageVerification(t *testing.T) {
+	writeImage := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "candidate.wal")
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := appendRecord(file, "key", Value{Value: "value", Version: 1, Origin: "node"}); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("valid", func(t *testing.T) {
+		if err := verifyWALImage(writeImage(t), 1); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("checksum corruption", func(t *testing.T) {
+		path := writeImage(t)
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, _ := file.Stat()
+		position := info.Size() - 1
+		var value [1]byte
+		if _, err := file.ReadAt(value[:], position); err != nil {
+			t.Fatal(err)
+		}
+		value[0] ^= 0xff
+		if _, err := file.WriteAt(value[:], position); err != nil {
+			t.Fatal(err)
+		}
+		_ = file.Close()
+		if err := verifyWALImage(path, 1); err == nil {
+			t.Fatal("checksum-corrupt image verified")
+		}
+	})
+	t.Run("partial tail", func(t *testing.T) {
+		path := writeImage(t)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(path, info.Size()-1); err != nil {
+			t.Fatal(err)
+		}
+		if err := verifyWALImage(path, 1); err == nil {
+			t.Fatal("partial image verified")
+		}
+	})
+	t.Run("wrong record count", func(t *testing.T) {
+		if err := verifyWALImage(writeImage(t), 2); err == nil {
+			t.Fatal("wrong record count verified")
+		}
+	})
+}
+
 func TestCompactionEligibilityUsesSizeAndStaleRatio(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
