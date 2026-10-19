@@ -28,6 +28,9 @@ storage lifetime. A second process fails startup instead of concurrently
 appending to the same WAL. The operating system releases the lock after a crash;
 the `.meshdb.lock` file itself is persistent and must not be used as a stale-lock
 signal.
+First-boot node identity is written and synced in a private temporary inode,
+then atomically linked into place. Concurrent creators converge on the same
+complete identity, and a crash cannot publish a partially written `node.id`.
 
 Start a replicated three-node demonstration:
 

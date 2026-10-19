@@ -30,9 +30,15 @@ func LoadOrCreate(dir string) (string, error) {
 		return "", fmt.Errorf("generate node identity: %w", err)
 	}
 	id := hex.EncodeToString(raw[:])
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := os.CreateTemp(dir, ".node-id-*.tmp")
 	if err != nil {
-		return "", fmt.Errorf("create node identity: %w", err)
+		return "", fmt.Errorf("create temporary node identity: %w", err)
+	}
+	tempPath := f.Name()
+	defer os.Remove(tempPath)
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return "", fmt.Errorf("protect node identity: %w", err)
 	}
 	if _, err := f.WriteString(id + "\n"); err != nil {
 		_ = f.Close()
@@ -44,6 +50,14 @@ func LoadOrCreate(dir string) (string, error) {
 	}
 	if err := f.Close(); err != nil {
 		return "", fmt.Errorf("close node identity: %w", err)
+	}
+	// Linking publishes a complete inode without overwriting an identity that a
+	// concurrent creator may have installed first.
+	if err := os.Link(tempPath, path); err != nil {
+		if contents, readErr := os.ReadFile(path); readErr == nil {
+			return validate(string(contents))
+		}
+		return "", fmt.Errorf("publish node identity: %w", err)
 	}
 	if err := fsutil.SyncDir(dir); err != nil {
 		return "", fmt.Errorf("persist node identity directory entry: %w", err)
