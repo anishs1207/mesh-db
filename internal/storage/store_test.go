@@ -225,6 +225,43 @@ func TestRecoveryRejectsUnknownFormatAndFields(t *testing.T) {
 	}
 }
 
+func TestStorageRejectsSemanticInvariantViolations(t *testing.T) {
+	invalid := map[string]struct {
+		key   string
+		value Value
+	}{
+		"empty key":         {key: "", value: Value{Version: 1, Origin: "node"}},
+		"whitespace key":    {key: "bad key", value: Value{Version: 1, Origin: "node"}},
+		"zero version":      {key: "key", value: Value{Origin: "node"}},
+		"empty origin":      {key: "key", value: Value{Version: 1}},
+		"whitespace origin": {key: "key", value: Value{Version: 1, Origin: "bad node"}},
+		"valued tombstone":  {key: "key", value: Value{Value: "resurrect", Version: 1, Origin: "node", Tombstone: true}},
+	}
+	for name, test := range invalid {
+		t.Run(name+" append", func(t *testing.T) {
+			store, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			if applied, err := store.Set(test.key, test.value); err == nil || applied {
+				t.Fatalf("invalid Set: applied=%v err=%v", applied, err)
+			}
+		})
+		t.Run(name+" recovery", func(t *testing.T) {
+			dir := t.TempDir()
+			payload, err := json.Marshal(walRecord{Format: walFormat, Key: test.key, Value: test.value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFramedPayload(t, dir, payload)
+			if _, err := Open(dir); err == nil {
+				t.Fatal("semantically invalid WAL record was recovered")
+			}
+		})
+	}
+}
+
 func TestCompactPreservesLatestValuesAndShrinksWAL(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)

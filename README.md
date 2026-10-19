@@ -81,6 +81,10 @@ WAL with only the latest value for each key.
 WAL records are checksummed and explicitly format-versioned. Startup accepts
 legacy records created before format markers, but rejects unknown fields and
 future formats rather than silently corrupting data during an unsafe downgrade.
+Checksummed records must also satisfy storage invariants: keys and origins are
+bounded and whitespace-free, versions are nonzero, values are bounded, and
+tombstones cannot carry a value. The same validation runs before live append
+and during recovery, so a valid CRC cannot legitimize malformed state.
 
 MeshDB also checks for online compaction every five minutes. By default it
 compacts only after the WAL reaches 256 MiB and contains at least twice as many

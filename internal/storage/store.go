@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/anishs1207/mesh-db/internal/fsutil"
@@ -22,6 +23,9 @@ const (
 	walName       = "meshdb.wal"
 	headerSize    = 8
 	maxRecordSize = 16 << 20
+	maxKeySize    = 4 << 10
+	maxValueSize  = 1 << 20
+	maxOriginSize = 4 << 10
 	walFormat     = 1
 )
 
@@ -189,7 +193,29 @@ func decodeRecord(payload []byte) (walRecord, error) {
 	if record.Format != 0 && record.Format != walFormat {
 		return walRecord{}, fmt.Errorf("unsupported WAL format %d", record.Format)
 	}
+	if err := validateRecord(record.Key, record.Value); err != nil {
+		return walRecord{}, err
+	}
 	return record, nil
+}
+
+func validateRecord(key string, value Value) error {
+	if key == "" || len(key) > maxKeySize || strings.ContainsAny(key, " \t\r\n") {
+		return fmt.Errorf("invalid WAL key")
+	}
+	if value.Version == 0 {
+		return fmt.Errorf("invalid zero WAL version")
+	}
+	if value.Origin == "" || len(value.Origin) > maxOriginSize || strings.ContainsAny(value.Origin, " \t\r\n") {
+		return fmt.Errorf("invalid WAL origin")
+	}
+	if len(value.Value) > maxValueSize {
+		return fmt.Errorf("WAL value exceeds %d bytes", maxValueSize)
+	}
+	if value.Tombstone && value.Value != "" {
+		return fmt.Errorf("WAL tombstone contains a value")
+	}
+	return nil
 }
 
 // Set durably appends value before publishing it in memory. It returns false
@@ -199,6 +225,9 @@ func (s *Store) Set(key string, value Value) (bool, error) {
 	defer s.mu.Unlock()
 	if s.closed {
 		return false, os.ErrClosed
+	}
+	if err := validateRecord(key, value); err != nil {
+		return false, err
 	}
 	if current, ok := s.data[key]; ok && !newer(value, current) {
 		return false, nil
