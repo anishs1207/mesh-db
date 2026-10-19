@@ -90,6 +90,12 @@ func (s *Store) Usage() (used, maximum int64) {
 func (s *Store) Put(owner, key string, value storage.Value) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strings.TrimSpace(owner) == "" || strings.ContainsAny(owner, " \t\r\n") {
+		return fmt.Errorf("invalid hint owner")
+	}
+	if err := storage.Validate(key, value); err != nil {
+		return fmt.Errorf("invalid hint value: %w", err)
+	}
 	slot := hintSlot(owner, key)
 	previous, hasPrevious := s.latest[slot]
 	incoming := Hint{Format: hintFormat, Owner: owner, Key: key, Value: value}
@@ -215,6 +221,12 @@ func validatedHint(name string, data []byte) (Hint, error) {
 	}
 	if hint.ID != expectedID {
 		return Hint{}, fmt.Errorf("failed content identity validation")
+	}
+	if strings.TrimSpace(hint.Owner) == "" || strings.ContainsAny(hint.Owner, " \t\r\n") {
+		return Hint{}, fmt.Errorf("invalid hint owner")
+	}
+	if err := storage.Validate(hint.Key, hint.Value); err != nil {
+		return Hint{}, fmt.Errorf("invalid hint value: %w", err)
 	}
 	return hint, nil
 }

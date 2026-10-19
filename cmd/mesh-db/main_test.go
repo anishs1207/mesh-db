@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -724,6 +725,26 @@ func TestBoundedPeerResponseReader(t *testing.T) {
 				t.Fatalf("read = %q, err=%v; want %q", got, err, test.want)
 			}
 		})
+	}
+}
+
+func TestReplicaResponseRejectsInvalidStorageSemantics(t *testing.T) {
+	validOrigin := base64.RawStdEncoding.EncodeToString([]byte("node"))
+	invalidOrigin := base64.RawStdEncoding.EncodeToString([]byte("bad node"))
+	validValue := base64.RawStdEncoding.EncodeToString([]byte("value"))
+	for name, response := range map[string]string{
+		"zero version":     "VALUE 0 " + validOrigin + " 0 " + validValue,
+		"invalid origin":   "VALUE 1 " + invalidOrigin + " 0 " + validValue,
+		"valued tombstone": "VALUE 1 " + validOrigin + " 1 " + validValue,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, err := parseReplicaResponse("key", response); err == nil {
+				t.Fatal("semantically invalid replica response was accepted")
+			}
+		})
+	}
+	if value, found, err := parseReplicaResponse("key", "VALUE 1 "+validOrigin+" 0 "+validValue); err != nil || !found || value.Value != "value" {
+		t.Fatalf("valid replica response: value=%#v found=%v err=%v", value, found, err)
 	}
 }
 

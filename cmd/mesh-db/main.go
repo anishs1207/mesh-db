@@ -340,6 +340,10 @@ func fetchReplica(peer, topology, key string, secret []byte, tlsConfig *tls.Conf
 	if err != nil {
 		return storage.Value{}, false, err
 	}
+	return parseReplicaResponse(key, line)
+}
+
+func parseReplicaResponse(key, line string) (storage.Value, bool, error) {
 	if line == "NOT_FOUND" {
 		return storage.Value{}, false, nil
 	}
@@ -366,7 +370,11 @@ func fetchReplica(peer, topology, key string, secret []byte, tlsConfig *tls.Conf
 			return storage.Value{}, false, fmt.Errorf("invalid replica value: %w", err)
 		}
 	}
-	return storage.Value{Version: version, Origin: string(origin), Value: string(value), Tombstone: tombstone}, true, nil
+	record := storage.Value{Version: version, Origin: string(origin), Value: string(value), Tombstone: tombstone}
+	if err := storage.Validate(key, record); err != nil {
+		return storage.Value{}, false, fmt.Errorf("invalid replica value semantics: %w", err)
+	}
+	return record, true, nil
 }
 
 func (s *Server) getReplica(owner, key string) (storage.Value, bool, error) {

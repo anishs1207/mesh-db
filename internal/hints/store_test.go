@@ -129,6 +129,30 @@ func TestHintContentTamperingIsRejected(t *testing.T) {
 	}
 }
 
+func TestHintSemanticViolationsAreRejected(t *testing.T) {
+	dir := t.TempDir()
+	invalid := storage.Value{Value: "live", Version: 3, Origin: "node", Tombstone: true}
+	id := contentID("owner", "key", invalid)
+	data, err := json.Marshal(Hint{Format: hintFormat, ID: id, Owner: "owner", Key: "key", Value: invalid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.List()
+	if err == nil || len(items) != 0 {
+		t.Fatalf("invalid persisted hint accepted: items=%#v err=%v", items, err)
+	}
+	if err := store.Put("owner", "key", invalid); err == nil {
+		t.Fatal("invalid live hint accepted")
+	}
+}
+
 func TestLegacyHintIdentityRemainsReadable(t *testing.T) {
 	dir := t.TempDir()
 	value := storage.Value{Value: "legacy", Version: 4, Origin: "old-node"}

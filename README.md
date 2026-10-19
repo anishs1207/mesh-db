@@ -85,6 +85,9 @@ Checksummed records must also satisfy storage invariants: keys and origins are
 bounded and whitespace-free, versions are nonzero, values are bounded, and
 tombstones cannot carry a value. The same validation runs before live append
 and during recovery, so a valid CRC cannot legitimize malformed state.
+Replica responses and hinted-handoff records pass through that same validator
+before quorum selection or retry, preventing malformed remote state from
+winning reconciliation or occupying a permanent repair slot.
 
 MeshDB also checks for online compaction every five minutes. By default it
 compacts only after the WAL reaches 256 MiB and contains at least twice as many

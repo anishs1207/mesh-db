@@ -193,13 +193,16 @@ func decodeRecord(payload []byte) (walRecord, error) {
 	if record.Format != 0 && record.Format != walFormat {
 		return walRecord{}, fmt.Errorf("unsupported WAL format %d", record.Format)
 	}
-	if err := validateRecord(record.Key, record.Value); err != nil {
+	if err := Validate(record.Key, record.Value); err != nil {
 		return walRecord{}, err
 	}
 	return record, nil
 }
 
-func validateRecord(key string, value Value) error {
+// Validate checks the semantic invariants required by ordering, addressing,
+// persistence, and repair. Every state-ingress path should call it before
+// accepting a Value as authoritative.
+func Validate(key string, value Value) error {
 	if key == "" || len(key) > maxKeySize || strings.ContainsAny(key, " \t\r\n") {
 		return fmt.Errorf("invalid WAL key")
 	}
@@ -226,7 +229,7 @@ func (s *Store) Set(key string, value Value) (bool, error) {
 	if s.closed {
 		return false, os.ErrClosed
 	}
-	if err := validateRecord(key, value); err != nil {
+	if err := Validate(key, value); err != nil {
 		return false, err
 	}
 	if current, ok := s.data[key]; ok && !newer(value, current) {
