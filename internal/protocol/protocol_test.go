@@ -49,3 +49,17 @@ func TestRejectsOversizedInput(t *testing.T) {
 		t.Fatalf("maximum value rejected: value=%d err=%v", len(request.Value), err)
 	}
 }
+
+func TestRejectsInvalidUTF8(t *testing.T) {
+	for name, command := range map[string]string{
+		"key":    "GET " + string([]byte{0xff}),
+		"value":  "SET key " + string([]byte{0xff}),
+		"origin": "REPLICA_DELETE " + strings.Repeat("a", 64) + " key 1 " + string([]byte{0xff}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Parse(command); err == nil {
+				t.Fatal("invalid UTF-8 command was accepted")
+			}
+		})
+	}
+}

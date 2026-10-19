@@ -152,6 +152,10 @@ size-bounded so a faulty peer cannot force unbounded coordinator allocation.
 The command-frame limit includes syntax, a 4 KiB key, a 1 MiB value, and
 authenticated replica metadata; parser and socket boundaries enforce the same
 contract, including exact maximum-size values.
+Keys, values, and replica origins must be valid UTF-8. This is enforced again at
+the storage boundary before JSON encoding, preventing Go's replacement-character
+normalization from making acknowledged in-memory bytes differ from recovered
+WAL bytes.
 At the shutdown deadline, remaining client sockets are forcibly closed and all
 handlers are still joined before the WAL is closed.
 

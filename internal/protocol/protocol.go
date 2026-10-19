@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -97,7 +98,7 @@ func Parse(line string) (Request, error) {
 		if err := validateKey(fields[1]); err != nil {
 			return Request{}, err
 		}
-		if fields[3] == "" || strings.ContainsAny(fields[3], " \t\r\n") {
+		if fields[3] == "" || !utf8.ValidString(fields[3]) || strings.ContainsAny(fields[3], " \t\r\n") {
 			return Request{}, fmt.Errorf("invalid origin")
 		}
 		if err := validateValue(fields[4]); err != nil {
@@ -132,7 +133,7 @@ func Parse(line string) (Request, error) {
 		if err := validateKey(fields[1]); err != nil {
 			return Request{}, err
 		}
-		if fields[3] == "" || strings.ContainsAny(fields[3], " \t\r\n") {
+		if fields[3] == "" || !utf8.ValidString(fields[3]) || strings.ContainsAny(fields[3], " \t\r\n") {
 			return Request{}, fmt.Errorf("invalid origin")
 		}
 		return Request{Command: ReplicaDelete, Topology: fields[0], Key: fields[1], Version: version, Origin: fields[3]}, nil
@@ -165,6 +166,9 @@ func validateKey(key string) error {
 	if key == "" {
 		return fmt.Errorf("key is empty")
 	}
+	if !utf8.ValidString(key) {
+		return fmt.Errorf("key is not valid UTF-8")
+	}
 	if len(key) > MaxKeyBytes {
 		return fmt.Errorf("key exceeds %d bytes", MaxKeyBytes)
 	}
@@ -177,6 +181,9 @@ func validateKey(key string) error {
 func validateValue(value string) error {
 	if value == "" {
 		return fmt.Errorf("value is empty")
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("value is not valid UTF-8")
 	}
 	if len(value) > MaxValueBytes {
 		return fmt.Errorf("value exceeds %d bytes", MaxValueBytes)

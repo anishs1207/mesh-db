@@ -360,6 +360,32 @@ func TestStorageRejectsSemanticInvariantViolations(t *testing.T) {
 	}
 }
 
+func TestStorageRejectsInvalidUTF8BeforeEncoding(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	invalidByte := string([]byte{0xff})
+	for name, test := range map[string]struct {
+		key   string
+		value Value
+	}{
+		"key":    {key: invalidByte, value: Value{Version: 1, Origin: "node"}},
+		"origin": {key: "key", value: Value{Version: 1, Origin: invalidByte}},
+		"value":  {key: "key", value: Value{Value: invalidByte, Version: 1, Origin: "node"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if applied, err := store.Set(test.key, test.value); err == nil || applied {
+				t.Fatalf("invalid UTF-8 Set: applied=%v err=%v", applied, err)
+			}
+		})
+	}
+	if bytes, records, keys, err := store.WALStats(); err != nil || bytes != 0 || records != 0 || keys != 0 {
+		t.Fatalf("invalid UTF-8 mutated storage: bytes=%d records=%d keys=%d err=%v", bytes, records, keys, err)
+	}
+}
+
 func TestCompactPreservesLatestValuesAndShrinksWAL(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)

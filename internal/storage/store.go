@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/anishs1207/mesh-db/internal/fsutil"
 )
@@ -229,14 +230,17 @@ func decodeRecord(payload []byte) (walRecord, error) {
 // persistence, and repair. Every state-ingress path should call it before
 // accepting a Value as authoritative.
 func Validate(key string, value Value) error {
-	if key == "" || len(key) > maxKeySize || strings.ContainsAny(key, " \t\r\n") {
+	if key == "" || !utf8.ValidString(key) || len(key) > maxKeySize || strings.ContainsAny(key, " \t\r\n") {
 		return fmt.Errorf("invalid WAL key")
 	}
 	if value.Version == 0 {
 		return fmt.Errorf("invalid zero WAL version")
 	}
-	if value.Origin == "" || len(value.Origin) > maxOriginSize || strings.ContainsAny(value.Origin, " \t\r\n") {
+	if value.Origin == "" || !utf8.ValidString(value.Origin) || len(value.Origin) > maxOriginSize || strings.ContainsAny(value.Origin, " \t\r\n") {
 		return fmt.Errorf("invalid WAL origin")
+	}
+	if !utf8.ValidString(value.Value) {
+		return fmt.Errorf("WAL value is not valid UTF-8")
 	}
 	if len(value.Value) > maxValueSize {
 		return fmt.Errorf("WAL value exceeds %d bytes", maxValueSize)
