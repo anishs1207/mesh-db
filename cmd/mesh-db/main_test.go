@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/anishs1207/mesh-db/internal/cluster"
 	hintstore "github.com/anishs1207/mesh-db/internal/hints"
+	"github.com/anishs1207/mesh-db/internal/protocol"
 	"github.com/anishs1207/mesh-db/internal/storage"
 )
 
@@ -722,6 +724,38 @@ func TestBoundedPeerResponseReader(t *testing.T) {
 				t.Fatalf("read = %q, err=%v; want %q", got, err, test.want)
 			}
 		})
+	}
+}
+
+func TestConnectionAcceptsMaximumProtocolValue(t *testing.T) {
+	server := newTestServer(t)
+	client, peer := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleConnection(peer, server)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		_ = client.Close()
+		<-done
+	})
+	if err := client.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	value := strings.Repeat("x", protocol.MaxValueBytes)
+	if _, err := fmt.Fprintf(client, "SET boundary %s\n", value); err != nil {
+		t.Fatal(err)
+	}
+	response, err := bufio.NewReader(client).ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(response, "OK version=1 acknowledgements=1") {
+		t.Fatalf("maximum-value response = %q", response)
+	}
+	stored, ok := server.store.Get("boundary")
+	if !ok || len(stored.Value) != protocol.MaxValueBytes {
+		t.Fatalf("stored maximum value: found=%v bytes=%d", ok, len(stored.Value))
 	}
 }
 

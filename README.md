@@ -110,6 +110,9 @@ in-flight connections drain up to `-shutdown-timeout`. Cancellation-aware
 repair, hinted-handoff, and compaction workers are joined before durable
 storage closes. Inter-node acknowledgement and value-response frames are also
 size-bounded so a faulty peer cannot force unbounded coordinator allocation.
+The command-frame limit includes syntax, a 4 KiB key, a 1 MiB value, and
+authenticated replica metadata; parser and socket boundaries enforce the same
+contract, including exact maximum-size values.
 At the shutdown deadline, remaining client sockets are forcibly closed and all
 handlers are still joined before the WAL is closed.
 

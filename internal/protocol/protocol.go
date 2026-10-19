@@ -9,9 +9,11 @@ import (
 )
 
 const (
-	MaxCommandBytes = 1 << 20
-	MaxKeyBytes     = 4 << 10
-	MaxValueBytes   = 1 << 20
+	MaxKeyBytes   = 4 << 10
+	MaxValueBytes = 1 << 20
+	// MaxCommandBytes includes command syntax, the maximum key and value, and
+	// enough authenticated-replica envelope metadata for the same mutation.
+	MaxCommandBytes = MaxValueBytes + MaxKeyBytes + 1024
 )
 
 type Command uint8
@@ -36,6 +38,9 @@ type Request struct {
 }
 
 func Parse(line string) (Request, error) {
+	if len(line) > MaxCommandBytes {
+		return Request{}, fmt.Errorf("command exceeds %d bytes", MaxCommandBytes)
+	}
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return Request{}, fmt.Errorf("empty command")

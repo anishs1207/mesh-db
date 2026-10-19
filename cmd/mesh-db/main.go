@@ -857,7 +857,9 @@ func handleConnection(conn net.Conn, server *Server) {
 	defer server.stats.activeConnections.Add(-1)
 
 	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 64<<10), protocol.MaxCommandBytes)
+	// Scanner includes delimiter space in its buffer accounting. The parser
+	// independently enforces MaxCommandBytes on the delimiter-free command.
+	scanner.Buffer(make([]byte, 64<<10), protocol.MaxCommandBytes+1)
 	writer := bufio.NewWriter(conn)
 
 	for {

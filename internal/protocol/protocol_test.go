@@ -42,4 +42,10 @@ func TestRejectsOversizedInput(t *testing.T) {
 	if _, err := Parse("SET key " + strings.Repeat("x", MaxValueBytes+1)); err == nil {
 		t.Fatal("expected oversized value to fail")
 	}
+	if _, err := Parse("PING" + strings.Repeat(" ", MaxCommandBytes)); err == nil {
+		t.Fatal("expected oversized command frame to fail")
+	}
+	if request, err := Parse("SET key " + strings.Repeat("x", MaxValueBytes)); err != nil || len(request.Value) != MaxValueBytes {
+		t.Fatalf("maximum value rejected: value=%d err=%v", len(request.Value), err)
+	}
 }
