@@ -135,6 +135,7 @@ func TestCorruptHintDoesNotBlockHealthyDelivery(t *testing.T) {
 	if err := store.Put("owner", "key", value); err != nil {
 		t.Fatal(err)
 	}
+	healthyBytes, _ := store.Usage()
 	corruptID := strings.Repeat("a", 64)
 	if err := os.WriteFile(filepath.Join(dir, corruptID+".json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
@@ -145,6 +146,20 @@ func TestCorruptHintDoesNotBlockHealthyDelivery(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Value != value {
 		t.Fatalf("healthy hints were lost: %#v", items)
+	}
+	if _, err := os.Stat(filepath.Join(dir, corruptID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupt hint remained active: %v", err)
+	}
+	quarantined, err := os.ReadDir(filepath.Join(dir, "quarantine"))
+	if err != nil || len(quarantined) != 1 || store.Quarantined() != 1 {
+		t.Fatalf("quarantine entries=%d metric=%d err=%v", len(quarantined), store.Quarantined(), err)
+	}
+	if used, _ := store.Usage(); used != healthyBytes {
+		t.Fatalf("quarantined hint consumes active capacity: used=%d want=%d", used, healthyBytes)
+	}
+	items, err = store.List()
+	if err != nil || len(items) != 1 {
+		t.Fatalf("quarantined hint retried: items=%#v err=%v", items, err)
 	}
 }
 

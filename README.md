@@ -171,6 +171,10 @@ retried every five seconds. Tune this with `-hint-interval`; hints survive a
 coordinator restart and are removed only after the target acknowledges them.
 New hint files are format-fenced and content-addressed, so on-disk payload
 tampering is rejected before it can become an authenticated replica mutation.
+Invalid files discovered by retry scans are atomically moved into
+`hints/quarantine`, removed from the active capacity accounting, and counted by
+`meshdb_quarantined_hints`. They are preserved for investigation but are not
+decoded or logged again on every retry pass.
 Pending hints are capped at 1 GiB by default with `-hint-max-bytes`; current and
 maximum usage are exported as metrics. Capacity exhaustion is logged and
 anti-entropy remains the fallback repair mechanism.

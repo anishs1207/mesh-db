@@ -956,8 +956,10 @@ func (s *Server) metrics() string {
 		ready = 1
 	}
 	hintBytes, hintMaxBytes := int64(0), int64(0)
+	var quarantinedHints uint64
 	if s.hints != nil {
 		hintBytes, hintMaxBytes = s.hints.Usage()
+		quarantinedHints = s.hints.Quarantined()
 	}
 	return fmt.Sprintf(`# HELP meshdb_ready Whether this node is ready to serve traffic.
 # TYPE meshdb_ready gauge
@@ -1010,12 +1012,15 @@ meshdb_hint_bytes %d
 # HELP meshdb_hint_max_bytes Configured hint storage budget.
 # TYPE meshdb_hint_max_bytes gauge
 meshdb_hint_max_bytes %d
+# HELP meshdb_quarantined_hints Corrupt hint files preserved outside the active retry queue.
+# TYPE meshdb_quarantined_hints gauge
+meshdb_quarantined_hints %d
 %s
 `, ready, s.topologyID, s.stats.activeConnections.Load(), s.stats.totalConnections.Load(),
 		s.stats.commands.Load(), s.stats.commandErrors.Load(), s.stats.quorumFailures.Load(),
 		s.stats.versionConflicts.Load(), boolGauge(s.stats.consistencyFenced.Load()),
 		s.stats.repairScans.Load(), s.stats.repairKeys.Load(), s.stats.repairFailures.Load(),
-		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load(), s.stats.hintsSuperseded.Load(), hintBytes, hintMaxBytes,
+		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load(), s.stats.hintsSuperseded.Load(), hintBytes, hintMaxBytes, quarantinedHints,
 		s.storageMetrics())
 }
 

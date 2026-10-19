@@ -3,6 +3,7 @@ package hints
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -30,13 +31,15 @@ type Hint struct {
 }
 
 type Store struct {
-	dir        string
-	mu         sync.Mutex
-	used       int64
-	maxBytes   int64
-	scanCursor string
-	latest     map[string]storedHint
-	conflicts  map[string]struct{}
+	dir         string
+	mu          sync.Mutex
+	used        int64
+	maxBytes    int64
+	scanCursor  string
+	latest      map[string]storedHint
+	conflicts   map[string]struct{}
+	quarantined uint64
+	files       map[string]int64
 }
 
 type storedHint struct {
@@ -53,8 +56,20 @@ func Open(dir string) (*Store, error) {
 		return nil, err
 	}
 	var used int64
+	var quarantined uint64
+	quarantineDir := filepath.Join(dir, "quarantine")
+	if quarantinedEntries, readErr := os.ReadDir(quarantineDir); readErr == nil {
+		for _, entry := range quarantinedEntries {
+			if !entry.IsDir() {
+				quarantined++
+			}
+		}
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("inspect hint quarantine: %w", readErr)
+	}
 	latest := make(map[string]storedHint)
 	conflicts := make(map[string]struct{})
+	files := make(map[string]int64)
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -64,6 +79,7 @@ func Open(dir string) (*Store, error) {
 			return nil, err
 		}
 		used += info.Size()
+		files[entry.Name()] = info.Size()
 		data, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
 		if readErr != nil {
 			return nil, readErr
@@ -82,7 +98,7 @@ func Open(dir string) (*Store, error) {
 			latest[slot] = storedHint{hint: hint, size: info.Size()}
 		}
 	}
-	return &Store{dir: dir, used: used, latest: latest, conflicts: conflicts}, nil
+	return &Store{dir: dir, used: used, latest: latest, conflicts: conflicts, quarantined: quarantined, files: files}, nil
 }
 
 func (s *Store) SetMaxBytes(maxBytes int64) { s.mu.Lock(); s.maxBytes = maxBytes; s.mu.Unlock() }
@@ -91,6 +107,12 @@ func (s *Store) Usage() (used, maximum int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.used, s.maxBytes
+}
+
+func (s *Store) Quarantined() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.quarantined
 }
 
 func (s *Store) Put(owner, key string, value storage.Value) error {
@@ -156,6 +178,7 @@ func (s *Store) Put(owner, key string, value storage.Value) error {
 		return fmt.Errorf("persist hint directory entry: %w", err)
 	}
 	s.used += int64(len(data))
+	s.files[id+".json"] = int64(len(data))
 	s.latest[slot] = storedHint{hint: hint, size: int64(len(data))}
 	if hasPrevious && previous.hint.ID != id {
 		oldPath := filepath.Join(s.dir, previous.hint.ID+".json")
@@ -166,6 +189,7 @@ func (s *Store) Put(owner, key string, value storage.Value) error {
 			return fmt.Errorf("persist superseded hint removal: %w", err)
 		}
 		s.used -= previous.size
+		delete(s.files, previous.hint.ID+".json")
 	}
 	return nil
 }
@@ -203,13 +227,20 @@ func (s *Store) ListLimit(limit int) ([]Hint, error) {
 		if limit > 0 {
 			s.scanCursor = entry.Name()
 		}
+		if err := s.trackEntry(entry); err != nil {
+			return nil, err
+		}
 		data, err := os.ReadFile(filepath.Join(s.dir, entry.Name()))
 		if err != nil {
 			return nil, err
 		}
 		hint, err := validatedHint(entry.Name(), data)
 		if err != nil {
-			decodeErrors = append(decodeErrors, fmt.Errorf("decode hint %s: %w", entry.Name(), err))
+			if quarantineErr := s.quarantine(entry); quarantineErr != nil {
+				decodeErrors = append(decodeErrors, fmt.Errorf("decode hint %s: %v; quarantine: %w", entry.Name(), err, quarantineErr))
+			} else {
+				decodeErrors = append(decodeErrors, fmt.Errorf("decode hint %s (quarantined): %w", entry.Name(), err))
+			}
 			continue
 		}
 		if _, conflicted := s.conflicts[hintSlot(hint.Owner, hint.Key)]; conflicted {
@@ -220,6 +251,50 @@ func (s *Store) ListLimit(limit int) ([]Hint, error) {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, errors.Join(decodeErrors...)
+}
+
+func (s *Store) trackEntry(entry os.DirEntry) error {
+	info, err := entry.Info()
+	if err != nil {
+		return err
+	}
+	previous := s.files[entry.Name()]
+	if previous != info.Size() {
+		s.used += info.Size() - previous
+		s.files[entry.Name()] = info.Size()
+	}
+	return nil
+}
+
+func (s *Store) quarantine(entry os.DirEntry) error {
+	quarantineDir := filepath.Join(s.dir, "quarantine")
+	if err := os.MkdirAll(quarantineDir, 0o750); err != nil {
+		return err
+	}
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return err
+	}
+	target := filepath.Join(quarantineDir, entry.Name()+"."+hex.EncodeToString(suffix[:]))
+	if err := os.Rename(filepath.Join(s.dir, entry.Name()), target); err != nil {
+		return err
+	}
+	counted := s.files[entry.Name()]
+	s.used -= counted
+	delete(s.files, entry.Name())
+	s.quarantined++
+	for slot, stored := range s.latest {
+		if stored.hint.ID+".json" == entry.Name() {
+			delete(s.latest, slot)
+		}
+	}
+	if err := fsutil.SyncDir(quarantineDir); err != nil {
+		return err
+	}
+	if err := fsutil.SyncDir(s.dir); err != nil {
+		return err
+	}
+	return nil
 }
 
 func validatedHint(name string, data []byte) (Hint, error) {
@@ -296,7 +371,7 @@ func (s *Store) Delete(id string) error {
 		return fmt.Errorf("invalid hint id")
 	}
 	path := filepath.Join(s.dir, id+".json")
-	info, statErr := os.Stat(path)
+	_, statErr := os.Stat(path)
 	if os.IsNotExist(statErr) {
 		return nil
 	}
@@ -308,7 +383,10 @@ func (s *Store) Delete(id string) error {
 		return nil
 	}
 	if err == nil {
-		s.used -= info.Size()
+		if counted, ok := s.files[id+".json"]; ok {
+			s.used -= counted
+			delete(s.files, id+".json")
+		}
 		for slot, stored := range s.latest {
 			if stored.hint.ID == id {
 				delete(s.latest, slot)
