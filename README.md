@@ -23,6 +23,12 @@ Start one node with durable local data:
 go run ./cmd/mesh-db -port 7000 -data-dir ./data/node-7000
 ```
 
+Each data directory is protected by an OS-backed exclusive lock for the full
+storage lifetime. A second process fails startup instead of concurrently
+appending to the same WAL. The operating system releases the lock after a crash;
+the `.meshdb.lock` file itself is persistent and must not be used as a stale-lock
+signal.
+
 Start a replicated three-node demonstration:
 
 ```bash

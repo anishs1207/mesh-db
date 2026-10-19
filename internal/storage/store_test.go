@@ -48,6 +48,28 @@ func TestRecoveryAndVersionOrdering(t *testing.T) {
 	}
 }
 
+func TestDataDirectoryIsExclusivelyLocked(t *testing.T) {
+	dir := t.TempDir()
+	first, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second, err := Open(dir); err == nil {
+		_ = second.Close()
+		t.Fatal("second store opened an active data directory")
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	third, err := Open(dir)
+	if err != nil {
+		t.Fatalf("data directory lock was not released: %v", err)
+	}
+	if err := third.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRecoveryTruncatesTornTail(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)

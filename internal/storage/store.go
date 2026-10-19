@@ -63,6 +63,7 @@ type Store struct {
 	mu         sync.RWMutex
 	data       map[string]Value
 	wal        *os.File
+	lockFile   *os.File
 	walPath    string
 	maxVersion uint64
 	records    uint64
@@ -76,6 +77,21 @@ func Open(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
+	lockFile, err := os.OpenFile(filepath.Join(dir, ".meshdb.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open data directory lock: %w", err)
+	}
+	if err := lockExclusive(lockFile); err != nil {
+		_ = lockFile.Close()
+		return nil, fmt.Errorf("data directory is already in use: %w", err)
+	}
+	keepLock := false
+	defer func() {
+		if !keepLock {
+			_ = unlockExclusive(lockFile)
+			_ = lockFile.Close()
+		}
+	}()
 
 	path := filepath.Join(dir, walName)
 	backupPath := path + ".backup"
@@ -107,7 +123,7 @@ func Open(dir string) (*Store, error) {
 		}
 	}
 
-	s := &Store{data: make(map[string]Value), wal: f, walPath: path}
+	s := &Store{data: make(map[string]Value), wal: f, lockFile: lockFile, walPath: path}
 	if err := s.recover(); err != nil {
 		_ = f.Close()
 		return nil, err
@@ -116,6 +132,7 @@ func Open(dir string) (*Store, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("seek WAL: %w", err)
 	}
+	keepLock = true
 	return s, nil
 }
 
@@ -585,11 +602,18 @@ func (s *Store) NeedsCompaction(minBytes int64, staleRatio float64) (bool, error
 func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.wal == nil {
+	if s.wal == nil && s.lockFile == nil {
 		return nil
 	}
-	err := s.wal.Close()
-	s.wal = nil
+	var closeErrors []error
+	if s.wal != nil {
+		closeErrors = append(closeErrors, s.wal.Close())
+		s.wal = nil
+	}
+	if s.lockFile != nil {
+		closeErrors = append(closeErrors, unlockExclusive(s.lockFile), s.lockFile.Close())
+		s.lockFile = nil
+	}
 	s.closed = true
-	return err
+	return errors.Join(closeErrors...)
 }
