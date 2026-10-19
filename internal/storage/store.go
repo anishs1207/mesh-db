@@ -31,6 +31,7 @@ const (
 
 var (
 	ErrWALCapacity     = errors.New("WAL capacity exceeded")
+	ErrKeyCapacity     = errors.New("retained key capacity exceeded")
 	ErrVersionConflict = errors.New("same version and origin contain different state")
 )
 
@@ -72,6 +73,8 @@ type Store struct {
 	records    uint64
 	maxBytes   int64
 	rejections uint64
+	maxKeys    int
+	keyRejects uint64
 	closed     bool
 }
 
@@ -261,6 +264,10 @@ func (s *Store) Set(key string, value Value) (bool, error) {
 		}
 		return false, nil
 	}
+	if _, exists := s.data[key]; !exists && s.maxKeys > 0 && len(s.data) >= s.maxKeys {
+		s.keyRejects++
+		return false, fmt.Errorf("%w: retained=%d limit=%d", ErrKeyCapacity, len(s.data), s.maxKeys)
+	}
 	payload, err := encodeRecord(key, value)
 	if err != nil {
 		return false, err
@@ -333,6 +340,12 @@ func appendPayload(w io.Writer, payload []byte) error {
 func (s *Store) SetMaxWALBytes(maxBytes int64) {
 	s.mu.Lock()
 	s.maxBytes = maxBytes
+	s.mu.Unlock()
+}
+
+func (s *Store) SetMaxLiveKeys(maxKeys int) {
+	s.mu.Lock()
+	s.maxKeys = maxKeys
 	s.mu.Unlock()
 }
 
@@ -591,6 +604,15 @@ func (s *Store) WALCapacityStats() (maximum int64, rejections uint64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.maxBytes, s.rejections
+}
+
+// KeyCapacityStats reports the retained-key limit and admission rejections.
+// Tombstones count as retained keys because they consume memory and are needed
+// to prevent resurrection.
+func (s *Store) KeyCapacityStats() (maximum int, rejections uint64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxKeys, s.keyRejects
 }
 
 // NeedsCompaction reports whether both the size floor and stale-record ratio

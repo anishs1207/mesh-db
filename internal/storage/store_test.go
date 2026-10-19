@@ -208,6 +208,45 @@ func TestWALCapacityRejectsBeforeAppend(t *testing.T) {
 	}
 }
 
+func TestRetainedKeyCapacityRejectsOnlyNewKeys(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetMaxLiveKeys(1)
+	if applied, err := store.Set("first", Value{Value: "one", Version: 1, Origin: "node"}); err != nil || !applied {
+		t.Fatalf("first Set: applied=%v err=%v", applied, err)
+	}
+	if applied, err := store.Set("first", Value{Value: "updated", Version: 2, Origin: "node"}); err != nil || !applied {
+		t.Fatalf("update at capacity: applied=%v err=%v", applied, err)
+	}
+	if applied, err := store.Set("second", Value{Value: "two", Version: 3, Origin: "node"}); !errors.Is(err, ErrKeyCapacity) || applied {
+		t.Fatalf("new key at capacity: applied=%v err=%v", applied, err)
+	}
+	maximum, rejections := store.KeyCapacityStats()
+	if maximum != 1 || rejections != 1 {
+		t.Fatalf("key capacity stats: maximum=%d rejections=%d", maximum, rejections)
+	}
+	if err := store.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if got, ok := store.Get("first"); !ok || got.Value != "updated" {
+		t.Fatalf("recovered retained value = %#v found=%v", got, ok)
+	}
+	if _, ok := store.Get("second"); ok {
+		t.Fatal("capacity-rejected key recovered")
+	}
+}
+
 func TestKeysAfterProvidesBoundedStablePages(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

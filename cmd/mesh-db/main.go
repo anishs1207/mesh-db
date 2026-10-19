@@ -1032,6 +1032,7 @@ func (s *Server) storageMetrics() string {
 		walBytes = -1
 	}
 	walMaxBytes, walRejections := s.store.WALCapacityStats()
+	maxLiveKeys, keyRejections := s.store.KeyCapacityStats()
 	return fmt.Sprintf(`# HELP meshdb_wal_bytes Current write-ahead log size in bytes.
 # TYPE meshdb_wal_bytes gauge
 meshdb_wal_bytes %d
@@ -1047,12 +1048,18 @@ meshdb_wal_records %d
 # HELP meshdb_live_keys Keys retained by the local storage engine, including tombstones.
 # TYPE meshdb_live_keys gauge
 meshdb_live_keys %d
+# HELP meshdb_max_live_keys Configured retained-key hard limit.
+# TYPE meshdb_max_live_keys gauge
+meshdb_max_live_keys %d
+# HELP meshdb_key_capacity_rejections_total New keys rejected because retained-key capacity was reached.
+# TYPE meshdb_key_capacity_rejections_total counter
+meshdb_key_capacity_rejections_total %d
 # HELP meshdb_compactions_total Successful online WAL compactions.
 # TYPE meshdb_compactions_total counter
 meshdb_compactions_total %d
 # HELP meshdb_compaction_failures_total Failed online WAL compactions.
 # TYPE meshdb_compaction_failures_total counter
-meshdb_compaction_failures_total %d`, walBytes, walMaxBytes, walRejections, walRecords, liveKeys,
+meshdb_compaction_failures_total %d`, walBytes, walMaxBytes, walRejections, walRecords, liveKeys, maxLiveKeys, keyRejections,
 		s.stats.compactions.Load(), s.stats.compactionFailures.Load())
 }
 
@@ -1118,6 +1125,7 @@ func main() {
 	hintInterval := flag.Duration("hint-interval", 5*time.Second, "interval between hinted-handoff retries (0 disables)")
 	hintMaxBytes := flag.Int64("hint-max-bytes", 1<<30, "maximum disk bytes for pending hinted handoff")
 	walMaxBytes := flag.Int64("wal-max-bytes", 10<<30, "maximum bytes allowed in the active write-ahead log")
+	maxLiveKeys := flag.Int("max-live-keys", 10_000_000, "maximum retained keys including tombstones")
 	hintBatchSize := flag.Int("hint-batch-size", 256, "maximum hinted handoff records attempted per retry pass")
 	repairBatchSize := flag.Int("repair-batch-size", 1024, "maximum keys reconciled per anti-entropy pass")
 	compactionInterval := flag.Duration("compaction-interval", 5*time.Minute, "interval for checking WAL compaction eligibility (0 disables)")
@@ -1127,7 +1135,7 @@ func main() {
 	tlsKeyFile := flag.String("tls-key", "", "PEM private key for mutually authenticated TLS")
 	tlsCAFile := flag.String("tls-ca", "", "PEM CA used to verify clients and peers")
 	flag.Parse()
-	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 || *walMaxBytes <= 0 || *hintBatchSize <= 0 || *repairBatchSize <= 0 || *compactionInterval < 0 || *compactionMinBytes <= 0 || *compactionStaleRatio < 1 {
+	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 || *walMaxBytes <= 0 || *maxLiveKeys <= 0 || *hintBatchSize <= 0 || *repairBatchSize <= 0 || *compactionInterval < 0 || *compactionMinBytes <= 0 || *compactionStaleRatio < 1 {
 		log.Fatal("connection limit and timeouts must be positive")
 	}
 
@@ -1199,6 +1207,7 @@ func main() {
 		log.Fatal("failed to open storage: ", err)
 	}
 	store.SetMaxWALBytes(*walMaxBytes)
+	store.SetMaxLiveKeys(*maxLiveKeys)
 	hints, err := hintstore.Open(filepath.Join(*dataDir, "hints"))
 	if err != nil {
 		_ = store.Close()

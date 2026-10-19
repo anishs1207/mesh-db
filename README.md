@@ -115,6 +115,13 @@ that would cross the exact framed-byte limit fail before append, while
 compaction remains available to reclaim obsolete records. Current usage, the
 limit, and capacity rejections are exported as metrics.
 
+The in-memory index separately caps retained keys—including tombstones—at ten
+million by default through `-max-live-keys`. New keys fail admission at the
+limit, while updates to retained keys and compaction continue to work. Monitor
+`meshdb_live_keys`, `meshdb_max_live_keys`, and
+`meshdb_key_capacity_rejections_total`; size the limit from measured per-key
+memory on deployment hardware rather than relying on the default.
+
 Use `-backup-on-startup /secure/path/backup.wal` during a controlled restart to
 create a compact, checksummed backup. The destination must be new. To restore,
 place the backup at `<new-data-dir>/meshdb.wal` before starting a node; always
