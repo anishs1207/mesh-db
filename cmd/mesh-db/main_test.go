@@ -484,6 +484,39 @@ func TestAntiEntropyRepairsKeyWithoutClientRead(t *testing.T) {
 	}
 }
 
+func TestAntiEntropyAdvancesInBoundedPages(t *testing.T) {
+	server := newTestServer(t)
+	server.repairBatchSize = 2
+	for version, key := range []string{"charlie", "alpha", "bravo", "delta", "echo"} {
+		if applied, err := server.store.Set(key, storage.Value{Value: key, Version: uint64(version + 1), Origin: server.nodeID}); err != nil || !applied {
+			t.Fatalf("Set(%q): applied=%v err=%v", key, applied, err)
+		}
+	}
+
+	server.repairOnce()
+	if got := server.stats.repairKeys.Load(); got != 2 {
+		t.Fatalf("first repair processed %d keys; want 2", got)
+	}
+	server.repairMu.Lock()
+	firstCursor := server.repairCursor
+	server.repairMu.Unlock()
+	if firstCursor != "bravo" {
+		t.Fatalf("first repair cursor = %q; want bravo", firstCursor)
+	}
+
+	server.repairOnce()
+	server.repairOnce()
+	if got := server.stats.repairKeys.Load(); got != 5 {
+		t.Fatalf("full paged repair processed %d keys; want 5", got)
+	}
+	server.repairMu.Lock()
+	finalCursor := server.repairCursor
+	server.repairMu.Unlock()
+	if finalCursor != "" {
+		t.Fatalf("completed repair cursor = %q; want empty", finalCursor)
+	}
+}
+
 func TestHintedHandoffDeliversPersistedMutation(t *testing.T) {
 	_, coordinator := startTestReplica(t)
 	ownerAddress, owner := startTestReplica(t)

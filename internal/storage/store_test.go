@@ -149,6 +149,43 @@ func TestWALCapacityRejectsBeforeAppend(t *testing.T) {
 	}
 }
 
+func TestKeysAfterProvidesBoundedStablePages(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for version, key := range []string{"echo", "alpha", "delta", "bravo", "charlie"} {
+		if applied, err := store.Set(key, Value{Value: key, Version: uint64(version + 1), Origin: "node"}); err != nil || !applied {
+			t.Fatalf("Set(%q): applied=%v err=%v", key, applied, err)
+		}
+	}
+
+	first, next := store.KeysAfter("", 2)
+	if got, want := strings.Join(first, ","), "alpha,bravo"; got != want || next != "bravo" {
+		t.Fatalf("first page = %q next=%q; want %q next=bravo", got, next, want)
+	}
+	second, next := store.KeysAfter(next, 2)
+	if got, want := strings.Join(second, ","), "charlie,delta"; got != want || next != "delta" {
+		t.Fatalf("second page = %q next=%q; want %q next=delta", got, next, want)
+	}
+	last, next := store.KeysAfter(next, 2)
+	if got := strings.Join(last, ","); got != "echo" || next != "" {
+		t.Fatalf("last page = %q next=%q; want echo and end cursor", got, next)
+	}
+}
+
+func TestKeysAfterRejectsUnboundedRequest(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if keys, next := store.KeysAfter("", 0); len(keys) != 0 || next != "" {
+		t.Fatalf("zero-limit page = %#v next=%q", keys, next)
+	}
+}
+
 func TestRecoveryAcceptsLegacyRecordWithoutFormatMarker(t *testing.T) {
 	dir := t.TempDir()
 	payload, err := json.Marshal(struct {

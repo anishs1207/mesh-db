@@ -112,7 +112,10 @@ handlers are still joined before the WAL is closed.
 
 Nodes perform anti-entropy reconciliation every 30 seconds by default so a
 replica that missed writes can converge without waiting for a client read. Use
-`-repair-interval` to tune it or `-repair-interval=0` to disable it.
+`-repair-interval` to tune it or `-repair-interval=0` to disable it. Each tick
+reconciles at most 1,024 keys and advances a stable cursor; tune the memory and
+network-work ceiling with `-repair-batch-size`. Key selection scans the current
+in-memory index, so this bounds allocation and replica traffic but not scan CPU.
 
 Failed replica deliveries are persisted under the node data directory and
 retried every five seconds. Tune this with `-hint-interval`; hints survive a

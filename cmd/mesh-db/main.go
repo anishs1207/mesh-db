@@ -59,6 +59,7 @@ type Server struct {
 	tlsConfig         *tls.Config
 	hints             *hintstore.Store
 	hintBatchSize     int
+	repairBatchSize   int
 	topologyID        string
 	replicaPut        func(string, string, storage.Value) error
 	replicaGet        func(string, string) (storage.Value, bool, error)
@@ -68,6 +69,8 @@ type Server struct {
 	replayMu          sync.Mutex
 	replayNonces      map[string]int64
 	replayLastSweep   int64
+	repairMu          sync.Mutex
+	repairCursor      string
 
 	// Protects the logical clock shared by concurrent client handlers.
 	clockMu sync.Mutex
@@ -597,7 +600,15 @@ func (s *Server) repairOnce() {
 
 func (s *Server) repairOnceContext(ctx context.Context) {
 	s.stats.repairScans.Add(1)
-	for key := range s.store.Entries() {
+	batchSize := s.repairBatchSize
+	if batchSize <= 0 {
+		batchSize = 1024
+	}
+	s.repairMu.Lock()
+	keys, next := s.store.KeysAfter(s.repairCursor, batchSize)
+	s.repairCursor = next
+	s.repairMu.Unlock()
+	for _, key := range keys {
 		if ctx.Err() != nil {
 			return
 		}
@@ -1016,6 +1027,7 @@ func main() {
 	hintMaxBytes := flag.Int64("hint-max-bytes", 1<<30, "maximum disk bytes for pending hinted handoff")
 	walMaxBytes := flag.Int64("wal-max-bytes", 10<<30, "maximum bytes allowed in the active write-ahead log")
 	hintBatchSize := flag.Int("hint-batch-size", 256, "maximum hinted handoff records attempted per retry pass")
+	repairBatchSize := flag.Int("repair-batch-size", 1024, "maximum keys reconciled per anti-entropy pass")
 	compactionInterval := flag.Duration("compaction-interval", 5*time.Minute, "interval for checking WAL compaction eligibility (0 disables)")
 	compactionMinBytes := flag.Int64("compaction-min-bytes", 256<<20, "minimum WAL size before automatic compaction")
 	compactionStaleRatio := flag.Float64("compaction-stale-ratio", 2, "minimum WAL records per live key before automatic compaction")
@@ -1023,7 +1035,7 @@ func main() {
 	tlsKeyFile := flag.String("tls-key", "", "PEM private key for mutually authenticated TLS")
 	tlsCAFile := flag.String("tls-ca", "", "PEM CA used to verify clients and peers")
 	flag.Parse()
-	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 || *walMaxBytes <= 0 || *hintBatchSize <= 0 || *compactionInterval < 0 || *compactionMinBytes <= 0 || *compactionStaleRatio < 1 {
+	if *maxConnections <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *shutdownTimeout <= 0 || *repairInterval < 0 || *hintInterval < 0 || *hintMaxBytes <= 0 || *walMaxBytes <= 0 || *hintBatchSize <= 0 || *repairBatchSize <= 0 || *compactionInterval < 0 || *compactionMinBytes <= 0 || *compactionStaleRatio < 1 {
 		log.Fatal("connection limit and timeouts must be positive")
 	}
 
@@ -1135,6 +1147,7 @@ func main() {
 		tlsConfig:         tlsConfig,
 		hints:             hints,
 		hintBatchSize:     *hintBatchSize,
+		repairBatchSize:   *repairBatchSize,
 		topologyID:        topologyFingerprint(ring, effectiveReplication, *readQuorum, *writeQuorum),
 	}
 

@@ -3,6 +3,7 @@ package storage
 import (
 	"bufio"
 	"bytes"
+	"container/heap"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -38,6 +39,19 @@ type walRecord struct {
 	Format uint8  `json:"format,omitempty"`
 	Key    string `json:"key"`
 	Value
+}
+
+type stringMaxHeap []string
+
+func (h stringMaxHeap) Len() int           { return len(h) }
+func (h stringMaxHeap) Less(i, j int) bool { return h[i] > h[j] }
+func (h stringMaxHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *stringMaxHeap) Push(value any)    { *h = append(*h, value.(string)) }
+func (h *stringMaxHeap) Pop() any {
+	old := *h
+	last := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return last
 }
 
 // Store is a durable, thread-safe key-value store backed by a checksummed WAL.
@@ -394,6 +408,44 @@ func (s *Store) Entries() map[string]Value {
 		entries[key] = value
 	}
 	return entries
+}
+
+// KeysAfter returns the next lexicographically ordered key page without
+// allocating in proportion to the full data set. An empty next cursor marks
+// the end of a pass; callers can restart from the empty cursor on their next
+// scheduled scan.
+func (s *Store) KeysAfter(after string, limit int) (keys []string, next string) {
+	if limit <= 0 {
+		return nil, ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	candidateLimit := limit
+	if limit < len(s.data) {
+		candidateLimit++
+	}
+	candidates := make(stringMaxHeap, 0, candidateLimit)
+	for key := range s.data {
+		if key <= after {
+			continue
+		}
+		if len(candidates) < candidateLimit {
+			heap.Push(&candidates, key)
+			continue
+		}
+		if key < candidates[0] {
+			candidates[0] = key
+			heap.Fix(&candidates, 0)
+		}
+	}
+	keys = append(keys, candidates...)
+	sort.Strings(keys)
+	if len(keys) > limit {
+		keys = keys[:limit]
+		return keys, keys[len(keys)-1]
+	}
+	return keys, ""
 }
 
 // Backup writes a consistent, compact, checksummed WAL image. The destination
