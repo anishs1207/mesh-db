@@ -20,6 +20,15 @@ import (
 var testClusterSecret = []byte("test-secret-that-is-at-least-32-bytes-long")
 var testTopology = strings.Repeat("a", 64)
 
+func mustAuthenticate(t *testing.T, command string) string {
+	t.Helper()
+	authenticated, err := authenticatedCommand(command, testClusterSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authenticated
+}
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	store, err := storage.Open(t.TempDir())
@@ -119,7 +128,7 @@ func TestCommandLifecycle(t *testing.T) {
 func TestReplicaAdvancesLogicalClock(t *testing.T) {
 	server := newTestServer(t)
 	command := "REPLICA_SET " + testTopology + " remote 9 peer-a replicated value"
-	if got := server.handleCommand(authenticatedCommand(command, testClusterSecret)); got != "OK" {
+	if got := server.handleCommand(mustAuthenticate(t, command)); got != "OK" {
 		t.Fatalf("REPLICA_SET = %q", got)
 	}
 	if got := server.handleCommand("SET local next"); got != "OK version=10 acknowledgements=1" {
@@ -140,11 +149,74 @@ func TestRejectsUnauthenticatedReplicaCommands(t *testing.T) {
 	}
 }
 
+func TestInternalAuthenticationRejectsReplayAndTampering(t *testing.T) {
+	server := newTestServer(t)
+	command := "REPLICA_GET " + testTopology + " key"
+	authenticated := mustAuthenticate(t, command)
+	if got := server.handleCommand(authenticated); got != "NOT_FOUND" {
+		t.Fatalf("first authenticated command = %q", got)
+	}
+	if got := server.handleCommand(authenticated); got != "ERR unauthorized" {
+		t.Fatalf("replayed command = %q", got)
+	}
+
+	other := mustAuthenticate(t, command)
+	if got := server.handleCommand(other + "-tampered"); got != "ERR unauthorized" {
+		t.Fatalf("tampered command = %q", got)
+	}
+}
+
+func TestInternalAuthenticationRejectsExpiredAndFutureEnvelopes(t *testing.T) {
+	server := newTestServer(t)
+	now := time.Unix(2_000_000_000, 0)
+	command := "REPLICA_GET " + testTopology + " key"
+	nonce := strings.Repeat("ab", internalNonceBytes)
+	window := int64(internalAuthSkew / time.Second)
+	for name, timestamp := range map[string]int64{
+		"expired": now.Unix() - window - 1,
+		"future":  now.Unix() + window + 1,
+	} {
+		t.Run(name, func(t *testing.T) {
+			timestampText := fmt.Sprint(timestamp)
+			signature := signInternal(timestampText, nonce, command, testClusterSecret)
+			if server.authenticateInternal(timestampText, nonce, signature, command, now) {
+				t.Fatal("out-of-window envelope authenticated")
+			}
+		})
+	}
+}
+
+func TestInternalAuthenticationExpiresReplayCacheEntries(t *testing.T) {
+	server := newTestServer(t)
+	now := time.Unix(2_000_000_000, 0)
+	command := "REPLICA_GET " + testTopology + " key"
+	oldNonce := strings.Repeat("ab", internalNonceBytes)
+	oldTimestamp := fmt.Sprint(now.Unix() - int64(internalAuthSkew/time.Second))
+	oldSignature := signInternal(oldTimestamp, oldNonce, command, testClusterSecret)
+	if !server.authenticateInternal(oldTimestamp, oldNonce, oldSignature, command, now) {
+		t.Fatal("valid envelope was rejected")
+	}
+
+	newNow := now.Add(internalAuthSkew + time.Second)
+	newNonce := strings.Repeat("cd", internalNonceBytes)
+	newTimestamp := fmt.Sprint(newNow.Unix())
+	newSignature := signInternal(newTimestamp, newNonce, command, testClusterSecret)
+	if !server.authenticateInternal(newTimestamp, newNonce, newSignature, command, newNow) {
+		t.Fatal("new envelope was rejected")
+	}
+	server.replayMu.Lock()
+	_, retained := server.replayNonces[oldNonce]
+	server.replayMu.Unlock()
+	if retained {
+		t.Fatal("expired replay-cache entry was retained")
+	}
+}
+
 func TestRejectsReplicaCommandFromDifferentTopology(t *testing.T) {
 	server := newTestServer(t)
 	otherTopology := strings.Repeat("b", 64)
 	command := "REPLICA_SET " + otherTopology + " key 1 peer value"
-	if got := server.handleCommand(authenticatedCommand(command, testClusterSecret)); got != "ERR topology_mismatch" {
+	if got := server.handleCommand(mustAuthenticate(t, command)); got != "ERR topology_mismatch" {
 		t.Fatalf("mismatched topology response = %q", got)
 	}
 	if _, ok := server.store.Get("key"); ok {
@@ -226,7 +298,7 @@ func TestRejectsReplicaCommandForNonOwner(t *testing.T) {
 		t.Fatal("failed to find key owned by node-b")
 	}
 	command := "REPLICA_SET " + testTopology + " " + key + " 1 peer value"
-	if got := server.handleCommand(authenticatedCommand(command, testClusterSecret)); got != "ERR not_owner" {
+	if got := server.handleCommand(mustAuthenticate(t, command)); got != "ERR not_owner" {
 		t.Fatalf("non-owner response = %q", got)
 	}
 	if _, ok := server.store.Get(key); ok {

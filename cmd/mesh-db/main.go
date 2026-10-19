@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -36,6 +37,9 @@ import (
 const (
 	maxReplicaAckBytes      = 4 << 10
 	maxReplicaResponseBytes = 2 << 20
+	internalAuthSkew        = 30 * time.Second
+	maxReplayEntries        = 65536
+	internalNonceBytes      = 16
 )
 
 var errReplicaSuperseded = errors.New("replica already stores a newer value")
@@ -61,6 +65,9 @@ type Server struct {
 	backgroundMu      sync.Mutex
 	background        sync.WaitGroup
 	backgroundClosing bool
+	replayMu          sync.Mutex
+	replayNonces      map[string]int64
+	replayLastSweep   int64
 
 	// Protects the logical clock shared by concurrent client handlers.
 	clockMu sync.Mutex
@@ -126,23 +133,64 @@ func (s *Server) observeVersion(version uint64) {
 	}
 }
 
-func signInternal(command string, secret []byte) string {
+func signInternal(timestamp, nonce, command string, secret []byte) string {
 	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte(command))
+	_, _ = mac.Write([]byte(timestamp + "\n" + nonce + "\n" + command))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-func authenticatedCommand(command string, secret []byte) string {
-	return "AUTH " + signInternal(command, secret) + " " + command
+func authenticatedCommand(command string, secret []byte) (string, error) {
+	nonceBytes := make([]byte, internalNonceBytes)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return "", fmt.Errorf("generate authentication nonce: %w", err)
+	}
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := hex.EncodeToString(nonceBytes)
+	return fmt.Sprintf("AUTH %s %s %s %s", timestamp, nonce,
+		signInternal(timestamp, nonce, command, secret), command), nil
 }
 
-func verifyInternal(signature, command string, secret []byte) bool {
-	provided, err := hex.DecodeString(signature)
-	if err != nil || len(secret) == 0 {
+func (s *Server) authenticateInternal(timestampText, nonce, signature, command string, now time.Time) bool {
+	timestamp, err := strconv.ParseInt(timestampText, 10, 64)
+	if err != nil || len(s.clusterSecret) == 0 {
 		return false
 	}
-	expected, err := hex.DecodeString(signInternal(command, secret))
-	return err == nil && hmac.Equal(provided, expected)
+	nowUnix := now.Unix()
+	window := int64(internalAuthSkew / time.Second)
+	if timestamp < nowUnix-window || timestamp > nowUnix+window {
+		return false
+	}
+	nonceBytes, err := hex.DecodeString(nonce)
+	if err != nil || len(nonceBytes) != internalNonceBytes {
+		return false
+	}
+	provided, err := hex.DecodeString(signature)
+	if err != nil {
+		return false
+	}
+	expected, err := hex.DecodeString(signInternal(timestampText, nonce, command, s.clusterSecret))
+	if err != nil || !hmac.Equal(provided, expected) {
+		return false
+	}
+
+	s.replayMu.Lock()
+	defer s.replayMu.Unlock()
+	if s.replayNonces == nil {
+		s.replayNonces = make(map[string]int64)
+	}
+	if nowUnix > s.replayLastSweep {
+		for candidate, expires := range s.replayNonces {
+			if expires < nowUnix {
+				delete(s.replayNonces, candidate)
+			}
+		}
+		s.replayLastSweep = nowUnix
+	}
+	if _, replayed := s.replayNonces[nonce]; replayed || len(s.replayNonces) >= maxReplayEntries {
+		return false
+	}
+	s.replayNonces[nonce] = timestamp + window
+	return true
 }
 
 func readBoundedLine(reader io.Reader, maxBytes int) (string, error) {
@@ -196,7 +244,11 @@ func replicate(peer, topology, key string, record storage.Value, secret []byte, 
 	} else {
 		command = fmt.Sprintf("REPLICA_SET %s %s %d %s %s", topology, key, record.Version, record.Origin, record.Value)
 	}
-	command = authenticatedCommand(command, secret) + "\n"
+	authenticated, err := authenticatedCommand(command, secret)
+	if err != nil {
+		return err
+	}
+	command = authenticated + "\n"
 
 	if _, err := writer.WriteString(command); err != nil {
 		return err
@@ -268,7 +320,11 @@ func fetchReplica(peer, topology, key string, secret []byte, tlsConfig *tls.Conf
 		return storage.Value{}, false, err
 	}
 	command := "REPLICA_GET " + topology + " " + key
-	if _, err := fmt.Fprintf(conn, "%s\n", authenticatedCommand(command, secret)); err != nil {
+	authenticated, err := authenticatedCommand(command, secret)
+	if err != nil {
+		return storage.Value{}, false, err
+	}
+	if _, err := fmt.Fprintf(conn, "%s\n", authenticated); err != nil {
 		return storage.Value{}, false, err
 	}
 	line, err := readBoundedLine(conn, maxReplicaResponseBytes)
@@ -558,13 +614,13 @@ func (s *Server) handleCommand(line string) string {
 	s.stats.commands.Add(1)
 	authorizedInternal := false
 	if strings.HasPrefix(line, "AUTH ") {
-		parts := strings.SplitN(line, " ", 3)
-		if len(parts) != 3 || !verifyInternal(parts[1], parts[2], s.clusterSecret) {
+		parts := strings.SplitN(line, " ", 5)
+		if len(parts) != 5 || !s.authenticateInternal(parts[1], parts[2], parts[3], parts[4], time.Now()) {
 			s.stats.commandErrors.Add(1)
 			return "ERR unauthorized"
 		}
 		authorizedInternal = true
-		line = parts[2]
+		line = parts[4]
 	}
 	request, err := protocol.Parse(line)
 	if err != nil {

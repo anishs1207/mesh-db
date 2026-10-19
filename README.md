@@ -58,6 +58,11 @@ virtual-node count, replication factor, and both quorums. Differently configured
 nodes reject each other before storage mutation; compare startup logs or
 `meshdb_topology_info` when diagnosing a cluster. The topology-fencing protocol
 requires a coordinated restart when upgrading from older builds.
+Every internal request also carries a signed timestamp and 128-bit random nonce.
+Receivers enforce a 30-second clock-skew window and reject a nonce after its
+first valid use, preventing captured replica commands from being replayed. Keep
+node clocks synchronized; this authentication-envelope change also requires a
+coordinated restart from older builds.
 Receivers also recompute placement and reject replica operations for keys they
 do not own, making routing mistakes visible instead of polluting non-owner
 storage.
