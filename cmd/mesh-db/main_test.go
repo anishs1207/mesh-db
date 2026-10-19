@@ -695,6 +695,21 @@ func TestOperationsEndpoints(t *testing.T) {
 	}
 }
 
+func TestOperationsBindFailsSynchronously(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer occupied.Close()
+	server := newTestServer(t)
+	operations, listener, err := bindOperationsServer(occupied.Addr().String(), server)
+	if err == nil {
+		_ = listener.Close()
+		_ = operations.Close()
+		t.Fatal("operations server bound an occupied address")
+	}
+}
+
 func TestTLSConfigurationMustBeComplete(t *testing.T) {
 	if config, err := loadTLSConfig("", "", ""); err != nil || config != nil {
 		t.Fatalf("disabled TLS = %#v, %v", config, err)
@@ -812,5 +827,22 @@ func TestPlaintextListenRequiresLoopbackOrExplicitOptIn(t *testing.T) {
 	}
 	if err := validateListenAddress("not-an-address", true, false); err == nil {
 		t.Fatal("malformed listen address accepted")
+	}
+}
+
+func TestOperationsListenRequiresLoopbackOrExplicitOptIn(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:9090", "[::1]:9090", "localhost:9090"} {
+		if err := validateOperationsAddress(address, false); err != nil {
+			t.Errorf("loopback operations address %q rejected: %v", address, err)
+		}
+	}
+	if err := validateOperationsAddress("0.0.0.0:9090", false); err == nil {
+		t.Fatal("external plaintext operations address accepted without opt-in")
+	}
+	if err := validateOperationsAddress("0.0.0.0:9090", true); err != nil {
+		t.Fatalf("explicit external operations opt-in rejected: %v", err)
+	}
+	if err := validateOperationsAddress("missing-port", true); err == nil {
+		t.Fatal("malformed operations address accepted")
 	}
 }

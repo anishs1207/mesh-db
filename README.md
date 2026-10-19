@@ -120,6 +120,12 @@ Enable operational endpoints with `-operations-address 127.0.0.1:9090`:
 - `/readyz` reports whether the node is accepting database traffic.
 - `/metrics` exports Prometheus-compatible counters and gauges.
 
+The operations listener is loopback-only by default because it is plaintext and
+exposes deployment metadata. External binding requires the explicit
+`-allow-insecure-operations` acknowledgement and should be confined by network
+policy. A configured operations address is bound synchronously before readiness;
+port conflicts fail startup instead of leaving an unmonitored ready node.
+
 Client concurrency and slow connections are bounded by `-max-connections`,
 `-read-timeout`, and `-write-timeout`. SIGINT/SIGTERM stops admission and lets
 in-flight connections drain up to `-shutdown-timeout`. Cancellation-aware
@@ -169,8 +175,9 @@ MESHDB_CLUSTER_SECRET_FILE=../meshdb-cluster.secret docker compose up --build
 
 Client ports are 7000-7002 and operations ports are 9090-9092. Each node uses a
 separate persistent Docker volume and runs as a non-root user. This local demo
-explicitly opts into plaintext on its isolated container network; add mounted
-certificates and the TLS flags before adapting it for production.
+explicitly opts into plaintext client and operations listeners on its isolated
+container network; add mounted certificates, the TLS flags, and appropriate
+operations-network isolation before adapting it for production.
 
 Follow the build history in [`prompts/`](prompts/README.md).
 

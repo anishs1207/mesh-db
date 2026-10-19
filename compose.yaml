@@ -18,6 +18,7 @@ services:
       - -data-dir=/data
       - -cluster-secret-file=/run/secrets/cluster_secret
       - -operations-address=0.0.0.0:9090
+      - -allow-insecure-operations
     ports: ["7000:7000", "9090:9090"]
     volumes: ["node1-data:/data"]
 
@@ -32,6 +33,7 @@ services:
       - -data-dir=/data
       - -cluster-secret-file=/run/secrets/cluster_secret
       - -operations-address=0.0.0.0:9090
+      - -allow-insecure-operations
     ports: ["7001:7000", "9091:9090"]
     volumes: ["node2-data:/data"]
 
@@ -46,6 +48,7 @@ services:
       - -data-dir=/data
       - -cluster-secret-file=/run/secrets/cluster_secret
       - -operations-address=0.0.0.0:9090
+      - -allow-insecure-operations
     ports: ["7002:7000", "9092:9090"]
     volumes: ["node3-data:/data"]
 

@@ -430,6 +430,20 @@ func validateListenAddress(address string, encrypted, allowInsecure bool) error 
 	return fmt.Errorf("plaintext client protocol may only listen on loopback; configure TLS or explicitly set -allow-insecure-listen")
 }
 
+func validateOperationsAddress(address string, allowExternal bool) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("invalid operations address: %w", err)
+	}
+	if allowExternal || strings.EqualFold(host, "localhost") {
+		return nil
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("plaintext operations endpoint may only listen on loopback; explicitly set -allow-insecure-operations for an isolated network")
+}
+
 func (s *Server) quorumWrite(key string, record storage.Value) (int, []string) {
 	owners := s.owners(key)
 	results := make(chan replicaResult, len(owners))
@@ -1026,6 +1040,14 @@ func newOperationsServer(address string, server *Server) *http.Server {
 	}
 }
 
+func bindOperationsServer(address string, server *Server) (*http.Server, net.Listener, error) {
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		return nil, nil, err
+	}
+	return newOperationsServer(address, server), listener, nil
+}
+
 func main() {
 	port := flag.String("port", "7000", "TCP port to listen on")
 	listenAddress := flag.String("listen-address", "", "client listen address (default 127.0.0.1:<port>)")
@@ -1047,6 +1069,7 @@ func main() {
 	writeTimeout := flag.Duration("write-timeout", 10*time.Second, "maximum time writing a response")
 	shutdownTimeout := flag.Duration("shutdown-timeout", 15*time.Second, "graceful shutdown deadline")
 	operationsAddress := flag.String("operations-address", "", "health and metrics HTTP address (for example 127.0.0.1:9090)")
+	allowInsecureOperations := flag.Bool("allow-insecure-operations", false, "allow plaintext operations traffic on a non-loopback address")
 	clusterSecretFile := flag.String("cluster-secret-file", "", "path to the shared inter-node authentication secret")
 	repairInterval := flag.Duration("repair-interval", 30*time.Second, "interval between anti-entropy scans (0 disables)")
 	hintInterval := flag.Duration("hint-interval", 5*time.Second, "interval between hinted-handoff retries (0 disables)")
@@ -1101,6 +1124,11 @@ func main() {
 	}
 	if err := validateListenAddress(*listenAddress, tlsConfig != nil, *allowInsecureListen); err != nil {
 		log.Fatal(err)
+	}
+	if *operationsAddress != "" {
+		if err := validateOperationsAddress(*operationsAddress, *allowInsecureOperations); err != nil {
+			log.Fatal(err)
+		}
 	}
 	members := append([]string{*advertise}, peers...)
 	ring := cluster.NewRing(members, cluster.DefaultVirtualNodes)
@@ -1177,6 +1205,15 @@ func main() {
 		topologyID:        topologyFingerprint(ring, effectiveReplication, *readQuorum, *writeQuorum),
 	}
 
+	var operations *http.Server
+	var operationsListener net.Listener
+	if *operationsAddress != "" {
+		operations, operationsListener, err = bindOperationsServer(*operationsAddress, server)
+		if err != nil {
+			log.Fatal("failed to bind operations endpoint: ", err)
+		}
+	}
+
 	listener, err := net.Listen("tcp", *listenAddress)
 	if err != nil {
 		log.Fatal("failed to start MeshDB:", err)
@@ -1196,12 +1233,10 @@ func main() {
 		_ = listener.Close()
 	}()
 
-	var operations *http.Server
-	if *operationsAddress != "" {
-		operations = newOperationsServer(*operationsAddress, server)
+	if operations != nil {
 		go func() {
-			log.Printf("Operations endpoint listening on %s", *operationsAddress)
-			if err := operations.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("Operations endpoint listening on %s", operationsListener.Addr())
+			if err := operations.Serve(operationsListener); err != nil && err != http.ErrServerClosed {
 				log.Printf("operations endpoint failed: %v", err)
 				stop()
 			}
