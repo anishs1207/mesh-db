@@ -99,6 +99,9 @@ func (s *Store) Put(owner, key string, value storage.Value) error {
 	slot := hintSlot(owner, key)
 	previous, hasPrevious := s.latest[slot]
 	incoming := Hint{Format: hintFormat, Owner: owner, Key: key, Value: value}
+	if hasPrevious && storage.VersionConflict(previous.hint.Value, value) {
+		return fmt.Errorf("hint version conflict: %w", storage.ErrVersionConflict)
+	}
 	if hasPrevious && !newerHint(incoming, previous.hint) {
 		return nil
 	}

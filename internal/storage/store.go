@@ -29,7 +29,10 @@ const (
 	walFormat     = 1
 )
 
-var ErrWALCapacity = errors.New("WAL capacity exceeded")
+var (
+	ErrWALCapacity     = errors.New("WAL capacity exceeded")
+	ErrVersionConflict = errors.New("same version and origin contain different state")
+)
 
 // Value is a versioned database value. Version and Origin form a total order.
 type Value struct {
@@ -186,6 +189,9 @@ func (s *Store) recover() error {
 		if err != nil {
 			return fmt.Errorf("decode WAL record at offset %d: %w", validOffset, err)
 		}
+		if current, ok := s.data[record.Key]; ok && VersionConflict(current, record.Value) {
+			return fmt.Errorf("WAL version conflict at offset %d: %w", validOffset, ErrVersionConflict)
+		}
 		s.apply(record.Key, record.Value)
 		s.records++
 		validOffset += int64(headerSize) + int64(length)
@@ -250,6 +256,9 @@ func (s *Store) Set(key string, value Value) (bool, error) {
 		return false, err
 	}
 	if current, ok := s.data[key]; ok && !newer(value, current) {
+		if VersionConflict(current, value) {
+			return false, ErrVersionConflict
+		}
 		return false, nil
 	}
 	payload, err := encodeRecord(key, value)
@@ -430,6 +439,12 @@ func writeFull(w io.Writer, data []byte) error {
 func newer(incoming, current Value) bool {
 	return incoming.Version > current.Version ||
 		(incoming.Version == current.Version && incoming.Origin > current.Origin)
+}
+
+// VersionConflict reports an invariant violation: a node identity allocated
+// one logical version to two different states.
+func VersionConflict(left, right Value) bool {
+	return left.Version == right.Version && left.Origin == right.Origin && left != right
 }
 
 func (s *Store) apply(key string, value Value) {

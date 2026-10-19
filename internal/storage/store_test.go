@@ -48,6 +48,43 @@ func TestRecoveryAndVersionOrdering(t *testing.T) {
 	}
 }
 
+func TestSameVersionDifferentStateFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := Value{Value: "first", Version: 7, Origin: "node"}
+	second := Value{Value: "second", Version: 7, Origin: "node"}
+	if applied, err := store.Set("key", first); err != nil || !applied {
+		t.Fatalf("first Set: applied=%v err=%v", applied, err)
+	}
+	if applied, err := store.Set("key", second); !errors.Is(err, ErrVersionConflict) || applied {
+		t.Fatalf("conflicting Set: applied=%v err=%v", applied, err)
+	}
+	if got, _ := store.Get("key"); got != first {
+		t.Fatalf("conflict changed state to %#v", got)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	file, err := os.OpenFile(filepath.Join(dir, walName), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendRecord(file, "key", second); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("conflicting WAL recovery error = %v", err)
+	}
+}
+
 func TestDataDirectoryIsExclusivelyLocked(t *testing.T) {
 	dir := t.TempDir()
 	first, err := Open(dir)

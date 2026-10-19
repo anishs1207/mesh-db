@@ -396,6 +396,27 @@ func TestQuorumReadDoesNotResurrectDeletedValue(t *testing.T) {
 	}
 }
 
+func TestQuorumReadFailsClosedOnSameVersionConflict(t *testing.T) {
+	server := newTestServer(t)
+	server.self = "node-a"
+	server.ring = cluster.NewRing([]string{"node-a", "node-b", "node-c"}, 16)
+	server.replicationFactor = 3
+	server.readQuorum = 2
+	server.writeQuorum = 2
+	server.replicaGet = func(owner, _ string) (storage.Value, bool, error) {
+		return storage.Value{Value: owner, Version: 9, Origin: "same-origin"}, true, nil
+	}
+	if got := server.handleCommand("GET key"); got != "ERR replica_version_conflict" {
+		t.Fatalf("GET conflict response = %q", got)
+	}
+	if got := server.handleCommand("SET key value"); got != "ERR consistency_fenced" {
+		t.Fatalf("operation after conflict = %q", got)
+	}
+	if server.stats.versionConflicts.Load() != 1 || !server.stats.consistencyFenced.Load() {
+		t.Fatal("conflict did not increment metrics and fence the coordinator")
+	}
+}
+
 func TestSuccessfulWriteReturnsWithoutWaitingForSlowReplica(t *testing.T) {
 	server := newTestServer(t)
 	server.ring = cluster.NewRing([]string{"fast-a", "fast-b", "slow"}, 16)

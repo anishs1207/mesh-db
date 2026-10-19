@@ -45,6 +45,7 @@ const (
 var (
 	errReplicaSuperseded = errors.New("replica already stores a newer value")
 	errVersionExhausted  = errors.New("logical version space exhausted")
+	errReplicaConflict   = errors.New("replicas returned conflicting state for one version")
 )
 
 // Server represents one MeshDB node.
@@ -117,6 +118,8 @@ type serverStats struct {
 	hintsSuperseded    atomic.Uint64
 	compactions        atomic.Uint64
 	compactionFailures atomic.Uint64
+	versionConflicts   atomic.Uint64
+	consistencyFenced  atomic.Bool
 }
 
 // nextVersion generates a monotonically increasing local version.
@@ -577,6 +580,10 @@ func (s *Server) quorumRead(key string) (storage.Value, bool, int, error) {
 		}
 		if result.found && (!foundWinner || newer(result.value, winner)) {
 			winner, foundWinner = result.value, true
+		} else if result.found && foundWinner && storage.VersionConflict(result.value, winner) {
+			s.stats.versionConflicts.Add(1)
+			s.stats.consistencyFenced.Store(true)
+			return storage.Value{}, false, successes, errReplicaConflict
 		}
 		// An agreeing quorum can return immediately. When replicas disagree, wait
 		// for every reachable response so a minority carrying a newer committed
@@ -608,6 +615,11 @@ func (s *Server) finishReadRepair(results <-chan replicaResult, remaining int, c
 		completed = append(completed, result)
 		if result.err == nil && result.found && (!foundWinner || newer(result.value, winner)) {
 			winner, foundWinner = result.value, true
+		} else if result.err == nil && result.found && foundWinner && storage.VersionConflict(result.value, winner) {
+			s.stats.versionConflicts.Add(1)
+			s.stats.consistencyFenced.Store(true)
+			log.Printf("read repair refused conflicting version for key %q", key)
+			return
 		}
 	}
 	if !foundWinner {
@@ -674,6 +686,11 @@ func (s *Server) handleCommand(line string) string {
 		s.stats.commandErrors.Add(1)
 		return "ERR not_owner"
 	}
+	if !authorizedInternal && s.stats.consistencyFenced.Load() &&
+		(request.Command == protocol.Get || request.Command == protocol.Set || request.Command == protocol.Delete) {
+		s.stats.commandErrors.Add(1)
+		return "ERR consistency_fenced"
+	}
 
 	switch request.Command {
 	case protocol.Ping:
@@ -682,6 +699,10 @@ func (s *Server) handleCommand(line string) string {
 	case protocol.Set:
 		observed, _, responses, err := s.quorumRead(request.Key)
 		if err != nil {
+			if errors.Is(err, errReplicaConflict) {
+				s.stats.commandErrors.Add(1)
+				return "ERR replica_version_conflict"
+			}
 			s.stats.quorumFailures.Add(1)
 			return fmt.Sprintf("ERR read_quorum_unavailable responses=%d required=%d", responses, s.readQuorum)
 		}
@@ -708,6 +729,10 @@ func (s *Server) handleCommand(line string) string {
 	case protocol.Delete:
 		observed, _, responses, err := s.quorumRead(request.Key)
 		if err != nil {
+			if errors.Is(err, errReplicaConflict) {
+				s.stats.commandErrors.Add(1)
+				return "ERR replica_version_conflict"
+			}
 			s.stats.quorumFailures.Add(1)
 			return fmt.Sprintf("ERR read_quorum_unavailable responses=%d required=%d", responses, s.readQuorum)
 		}
@@ -795,6 +820,10 @@ func (s *Server) handleCommand(line string) string {
 	case protocol.Get:
 		record, ok, responses, err := s.quorumRead(request.Key)
 		if err != nil {
+			if errors.Is(err, errReplicaConflict) {
+				s.stats.commandErrors.Add(1)
+				return "ERR replica_version_conflict"
+			}
 			s.stats.quorumFailures.Add(1)
 			return fmt.Sprintf("ERR read_quorum_unavailable responses=%d required=%d", responses, s.readQuorum)
 		}
@@ -923,7 +952,7 @@ func closeTrackedConnections(connections *sync.Map) int {
 
 func (s *Server) metrics() string {
 	ready := 0
-	if s.stats.ready.Load() {
+	if s.stats.ready.Load() && !s.stats.consistencyFenced.Load() {
 		ready = 1
 	}
 	hintBytes, hintMaxBytes := int64(0), int64(0)
@@ -951,6 +980,12 @@ meshdb_command_errors_total %d
 # HELP meshdb_quorum_failures_total Operations that did not reach quorum.
 # TYPE meshdb_quorum_failures_total counter
 meshdb_quorum_failures_total %d
+# HELP meshdb_version_conflicts_total Impossible same-version divergent states observed.
+# TYPE meshdb_version_conflicts_total counter
+meshdb_version_conflicts_total %d
+# HELP meshdb_consistency_fenced Whether client data operations are fenced after an impossible conflict.
+# TYPE meshdb_consistency_fenced gauge
+meshdb_consistency_fenced %d
 # HELP meshdb_repair_scans_total Anti-entropy scans started.
 # TYPE meshdb_repair_scans_total counter
 meshdb_repair_scans_total %d
@@ -978,9 +1013,17 @@ meshdb_hint_max_bytes %d
 %s
 `, ready, s.topologyID, s.stats.activeConnections.Load(), s.stats.totalConnections.Load(),
 		s.stats.commands.Load(), s.stats.commandErrors.Load(), s.stats.quorumFailures.Load(),
+		s.stats.versionConflicts.Load(), boolGauge(s.stats.consistencyFenced.Load()),
 		s.stats.repairScans.Load(), s.stats.repairKeys.Load(), s.stats.repairFailures.Load(),
 		s.stats.hintsQueued.Load(), s.stats.hintsDelivered.Load(), s.stats.hintsSuperseded.Load(), hintBytes, hintMaxBytes,
 		s.storageMetrics())
+}
+
+func boolGauge(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (s *Server) storageMetrics() string {
@@ -1021,7 +1064,7 @@ func newOperationsServer(address string, server *Server) *http.Server {
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		if !server.stats.ready.Load() {
+		if !server.stats.ready.Load() || server.stats.consistencyFenced.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte("not ready\n"))
 			return

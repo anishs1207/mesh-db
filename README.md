@@ -83,6 +83,12 @@ are not hidden by the fast path.
 Logical versions are overflow-fenced: if the 64-bit Lamport space is exhausted,
 new client mutations fail with `ERR version_space_exhausted` instead of wrapping
 to zero and being silently treated as stale.
+Two different states carrying the same version and origin are an impossible
+ordering conflict, not a stale update. Storage append/recovery, hints, and
+quorum reads reject it explicitly. A coordinator that observes such divergence
+fences further client data operations, becomes unready, and exports
+`meshdb_version_conflicts_total` plus `meshdb_consistency_fenced` for operator
+intervention rather than selecting an arrival-order winner.
 
 Use `-compact-on-startup` during a controlled restart to rewrite an oversized
 WAL with only the latest value for each key.

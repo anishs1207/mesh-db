@@ -2,6 +2,7 @@ package hints
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -74,6 +75,25 @@ func TestPutCoalescesVersionsForOwnerAndKey(t *testing.T) {
 	items, err = store.List()
 	if err != nil || len(items) != 1 || items[0].Value.Version != 4 {
 		t.Fatalf("post-restart hints = %#v, err=%v", items, err)
+	}
+}
+
+func TestPutRejectsSameVersionDifferentState(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := storage.Value{Value: "first", Version: 3, Origin: "node"}
+	second := storage.Value{Value: "second", Version: 3, Origin: "node"}
+	if err := store.Put("owner", "key", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put("owner", "key", second); !errors.Is(err, storage.ErrVersionConflict) {
+		t.Fatalf("hint conflict error = %v", err)
+	}
+	items, err := store.List()
+	if err != nil || len(items) != 1 || items[0].Value != first {
+		t.Fatalf("hints after conflict = %#v err=%v", items, err)
 	}
 }
 
