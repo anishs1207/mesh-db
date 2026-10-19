@@ -97,6 +97,34 @@ func TestPutRejectsSameVersionDifferentState(t *testing.T) {
 	}
 }
 
+func TestReopenIsolatesPersistedSameVersionConflicts(t *testing.T) {
+	dir := t.TempDir()
+	for _, value := range []storage.Value{
+		{Value: "first", Version: 3, Origin: "node"},
+		{Value: "second", Version: 3, Origin: "node"},
+	} {
+		id := contentID("owner", "key", value)
+		data, err := json.Marshal(Hint{Format: hintFormat, ID: id, Owner: "owner", Key: "key", Value: value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, id+".json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.List()
+	if !errors.Is(err, storage.ErrVersionConflict) || len(items) != 0 {
+		t.Fatalf("conflicting persisted hints: items=%#v err=%v", items, err)
+	}
+	if err := store.Put("owner", "key", storage.Value{Value: "newer", Version: 4, Origin: "node"}); !errors.Is(err, storage.ErrVersionConflict) {
+		t.Fatalf("write into conflicted slot error = %v", err)
+	}
+}
+
 func TestCorruptHintDoesNotBlockHealthyDelivery(t *testing.T) {
 	dir := t.TempDir()
 	store, err := Open(dir)

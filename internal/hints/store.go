@@ -36,6 +36,7 @@ type Store struct {
 	maxBytes   int64
 	scanCursor string
 	latest     map[string]storedHint
+	conflicts  map[string]struct{}
 }
 
 type storedHint struct {
@@ -53,6 +54,7 @@ func Open(dir string) (*Store, error) {
 	}
 	var used int64
 	latest := make(map[string]storedHint)
+	conflicts := make(map[string]struct{})
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -72,11 +74,15 @@ func Open(dir string) (*Store, error) {
 		}
 		slot := hintSlot(hint.Owner, hint.Key)
 		current, ok := latest[slot]
+		if ok && storage.VersionConflict(current.hint.Value, hint.Value) {
+			conflicts[slot] = struct{}{}
+			continue
+		}
 		if !ok || newerHint(hint, current.hint) {
 			latest[slot] = storedHint{hint: hint, size: info.Size()}
 		}
 	}
-	return &Store{dir: dir, used: used, latest: latest}, nil
+	return &Store{dir: dir, used: used, latest: latest, conflicts: conflicts}, nil
 }
 
 func (s *Store) SetMaxBytes(maxBytes int64) { s.mu.Lock(); s.maxBytes = maxBytes; s.mu.Unlock() }
@@ -97,6 +103,9 @@ func (s *Store) Put(owner, key string, value storage.Value) error {
 		return fmt.Errorf("invalid hint value: %w", err)
 	}
 	slot := hintSlot(owner, key)
+	if _, conflicted := s.conflicts[slot]; conflicted {
+		return fmt.Errorf("persisted hint version conflict for owner and key: %w", storage.ErrVersionConflict)
+	}
 	previous, hasPrevious := s.latest[slot]
 	incoming := Hint{Format: hintFormat, Owner: owner, Key: key, Value: value}
 	if hasPrevious && storage.VersionConflict(previous.hint.Value, value) {
@@ -201,6 +210,10 @@ func (s *Store) ListLimit(limit int) ([]Hint, error) {
 		hint, err := validatedHint(entry.Name(), data)
 		if err != nil {
 			decodeErrors = append(decodeErrors, fmt.Errorf("decode hint %s: %w", entry.Name(), err))
+			continue
+		}
+		if _, conflicted := s.conflicts[hintSlot(hint.Owner, hint.Key)]; conflicted {
+			decodeErrors = append(decodeErrors, fmt.Errorf("conflicting hints for owner %q key %q: %w", hint.Owner, hint.Key, storage.ErrVersionConflict))
 			continue
 		}
 		result = append(result, hint)

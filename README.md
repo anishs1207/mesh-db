@@ -168,6 +168,10 @@ starve healthy deliveries later in filename order.
 Repeated failures for the same replica and key are coalesced to the newest
 version, preventing hot keys from filling the repair budget with obsolete
 history during an extended outage.
+On startup the complete hint directory is also checked for cross-file
+same-version conflicts. Every record in a conflicted owner/key slot is isolated
+from delivery and further writes to that slot fail explicitly until an operator
+preserves evidence, removes the conflicting files, and restarts the node.
 
 ## Containerized three-node cluster
 
