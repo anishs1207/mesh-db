@@ -451,6 +451,12 @@ func writeFull(w io.Writer, data []byte) error {
 		if err != nil {
 			return err
 		}
+		if n < 0 || n > len(data) {
+			return fmt.Errorf("invalid WAL write count %d", n)
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
 		data = data[n:]
 	}
 	return nil
