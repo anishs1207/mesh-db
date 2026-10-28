@@ -89,6 +89,9 @@ quorum reads reject it explicitly. A coordinator that observes such divergence
 fences further client data operations, becomes unready, and exports
 `meshdb_version_conflicts_total` plus `meshdb_consistency_fenced` for operator
 intervention rather than selecting an arrival-order winner.
+Replica writes also return a distinct version-conflict error; both the receiving
+node and the coordinator fence client data operations, and the conflicting write
+is not queued as a retryable hint.
 
 Use `-compact-on-startup` during a controlled restart to rewrite an oversized
 WAL with only the latest value for each key.

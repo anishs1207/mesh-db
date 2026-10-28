@@ -277,6 +277,9 @@ func replicate(peer, topology, key string, record storage.Value, secret []byte, 
 		if response == "STALE" {
 			return errReplicaSuperseded
 		}
+		if response == "ERR version_conflict" {
+			return storage.ErrVersionConflict
+		}
 		return fmt.Errorf("peer returned %q", response)
 	}
 
@@ -302,7 +305,12 @@ func (s *Server) owners(key string) []string {
 	return s.ring.Owners(key, s.replicationFactor)
 }
 
-func (s *Server) putReplica(owner, key string, record storage.Value) error {
+func (s *Server) putReplica(owner, key string, record storage.Value) (err error) {
+	defer func() {
+		if errors.Is(err, storage.ErrVersionConflict) {
+			s.fenceVersionConflict()
+		}
+	}()
 	if s.replicaPut != nil {
 		return s.replicaPut(owner, key, record)
 	}
@@ -320,6 +328,11 @@ func (s *Server) putReplica(owner, key string, record storage.Value) error {
 		return nil
 	}
 	return replicate(owner, s.topologyID, key, record, s.clusterSecret, s.tlsConfig)
+}
+
+func (s *Server) fenceVersionConflict() {
+	s.stats.versionConflicts.Add(1)
+	s.stats.consistencyFenced.Store(true)
 }
 
 func fetchReplica(peer, topology, key string, secret []byte, tlsConfig *tls.Config) (storage.Value, bool, error) {
@@ -467,7 +480,7 @@ func (s *Server) quorumWrite(key string, record storage.Value) (int, []string) {
 		} else {
 			log.Printf("replication to %s failed: %v", result.owner, result.err)
 			failed = append(failed, result.owner)
-			if s.hints != nil && !errors.Is(result.err, errReplicaSuperseded) {
+			if s.hints != nil && !errors.Is(result.err, errReplicaSuperseded) && !errors.Is(result.err, storage.ErrVersionConflict) {
 				if err := s.hints.Put(result.owner, key, record); err != nil {
 					log.Printf("persist hint for %s failed: %v", result.owner, err)
 				} else {
@@ -499,7 +512,7 @@ func (s *Server) drainWriteResults(results <-chan replicaResult, remaining int, 
 			continue
 		}
 		log.Printf("replication to %s failed after quorum: %v", result.owner, result.err)
-		if s.hints == nil || errors.Is(result.err, errReplicaSuperseded) {
+		if s.hints == nil || errors.Is(result.err, errReplicaSuperseded) || errors.Is(result.err, storage.ErrVersionConflict) {
 			continue
 		}
 		if err := s.hints.Put(result.owner, key, record); err != nil {
@@ -765,6 +778,10 @@ func (s *Server) handleCommand(line string) string {
 		s.observeVersion(request.Version)
 		applied, err := s.store.Set(request.Key, record)
 		if err != nil {
+			if errors.Is(err, storage.ErrVersionConflict) {
+				s.fenceVersionConflict()
+				return "ERR version_conflict"
+			}
 			return "ERR persistence failure"
 		}
 		if !applied {
@@ -786,6 +803,10 @@ func (s *Server) handleCommand(line string) string {
 		s.observeVersion(request.Version)
 		applied, err := s.store.Set(request.Key, record)
 		if err != nil {
+			if errors.Is(err, storage.ErrVersionConflict) {
+				s.fenceVersionConflict()
+				return "ERR version_conflict"
+			}
 			return "ERR persistence failure"
 		}
 		if !applied {
