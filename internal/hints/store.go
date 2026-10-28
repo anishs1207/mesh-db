@@ -20,7 +20,10 @@ import (
 	"github.com/anishs1207/mesh-db/internal/storage"
 )
 
-const hintFormat = 1
+const (
+	hintFormat       = 1
+	maxHintFileBytes = 8 << 20
+)
 
 type Hint struct {
 	Format uint8         `json:"format,omitempty"`
@@ -80,8 +83,11 @@ func Open(dir string) (*Store, error) {
 		}
 		used += info.Size()
 		files[entry.Name()] = info.Size()
-		data, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		data, readErr := readHintFile(filepath.Join(dir, entry.Name()))
 		if readErr != nil {
+			if errors.Is(readErr, errHintTooLarge) {
+				continue
+			}
 			return nil, readErr
 		}
 		hint, decodeErr := validatedHint(entry.Name(), data)
@@ -142,6 +148,9 @@ func (s *Store) Put(owner, key string, value storage.Value) error {
 	data, err := json.Marshal(hint)
 	if err != nil {
 		return fmt.Errorf("encode hint: %w", err)
+	}
+	if len(data) > maxHintFileBytes {
+		return errHintTooLarge
 	}
 	projected := s.used + int64(len(data))
 	if hasPrevious {
@@ -230,8 +239,16 @@ func (s *Store) ListLimit(limit int) ([]Hint, error) {
 		if err := s.trackEntry(entry); err != nil {
 			return nil, err
 		}
-		data, err := os.ReadFile(filepath.Join(s.dir, entry.Name()))
+		data, err := readHintFile(filepath.Join(s.dir, entry.Name()))
 		if err != nil {
+			if errors.Is(err, errHintTooLarge) {
+				if quarantineErr := s.quarantine(entry); quarantineErr != nil {
+					decodeErrors = append(decodeErrors, fmt.Errorf("oversized hint %s: %v; quarantine: %w", entry.Name(), err, quarantineErr))
+				} else {
+					decodeErrors = append(decodeErrors, fmt.Errorf("oversized hint %s (quarantined): %w", entry.Name(), err))
+				}
+				continue
+			}
 			return nil, err
 		}
 		hint, err := validatedHint(entry.Name(), data)
@@ -251,6 +268,24 @@ func (s *Store) ListLimit(limit int) ([]Hint, error) {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
 	return result, errors.Join(decodeErrors...)
+}
+
+var errHintTooLarge = errors.New("hint file exceeds size limit")
+
+func readHintFile(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxHintFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxHintFileBytes {
+		return nil, errHintTooLarge
+	}
+	return data, nil
 }
 
 func (s *Store) trackEntry(entry os.DirEntry) error {

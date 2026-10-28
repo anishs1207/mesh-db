@@ -180,6 +180,8 @@ Invalid files discovered by retry scans are atomically moved into
 `hints/quarantine`, removed from the active capacity accounting, and counted by
 `meshdb_quarantined_hints`. They are preserved for investigation but are not
 decoded or logged again on every retry pass.
+Individual hint files are limited to 8 MiB on write and while scanning; larger
+files are quarantined without reading them fully into memory.
 Pending hints are capped at 1 GiB by default with `-hint-max-bytes`; current and
 maximum usage are exported as metrics. Capacity exhaustion is logged and
 anti-entropy remains the fallback repair mechanism.
